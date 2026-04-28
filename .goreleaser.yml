@@ -53,6 +53,14 @@ version: 2
 
 project_name: codemap
 
+# zig (v0.13) is not safe to invoke concurrently against its global cache —
+# parallel goroutines compiling different targets race on the same compile-id
+# directory and surface as `error: unable to create compilation: AccessDenied`.
+# Each wrapper sets its own ZIG_LOCAL_CACHE_DIR (see scripts/zigcc-*.sh) so the
+# common case is fine, but keeping zig invocations serialised here removes the
+# remaining race when the same zig process compiles many TUs back-to-back.
+dist: dist
+
 before:
   hooks:
     - go mod tidy
