@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>codemap — {{.RepoName}}</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      padding: 0.75rem 1.25rem;
+      background: #fff;
+      border-bottom: 1px solid #ddd;
+      height: 80px;
+    }
+    header .field { display: flex; flex-direction: column; }
+    header .label { font-size: 0.65rem; text-transform: uppercase; color: #888; }
+    header .value { font-size: 0.9rem; color: #222; font-weight: 500; }
+    #graph {
+      width: 100%;
+      height: calc(100vh - 80px);
+      border: 1px solid #ccc;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="field">
+      <span class="label">Repo</span>
+      <span class="value" title="{{.RepoPath}}">{{.RepoName}}</span>
+    </div>
+    <div class="field">
+      <span class="label">Last Indexed</span>
+      <span class="value">{{.LastIndexed}}</span>
+    </div>
+    <div class="field">
+      <span class="label">Files</span>
+      <span class="value">{{.FileCount}}</span>
+    </div>
+    <div class="field">
+      <span class="label">Symbols</span>
+      <span class="value">{{.SymbolCount}}</span>
+    </div>
+    <div class="field">
+      <span class="label">Edges</span>
+      <span class="value">{{.EdgeCount}}</span>
+    </div>
+  </header>
+  <div id="graph"></div>
+  <script>
+    const data = {
+      nodes: {{.NodesJSON}},
+      edges: {{.EdgesJSON}}
+    };
+    const network = new vis.Network(
+      document.getElementById('graph'),
+      data,
+      { nodes: { shape: 'dot', size: 10 }, physics: { stabilization: true } }
+    );
+  </script>
+</body>
+</html>

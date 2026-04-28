@@ -1,0 +1,41 @@
+name: ci
+on:
+  push:
+    branches: [main, develop, feat]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Tree-sitter (used by internal/parser/python) requires CGO.
+      # setup-go installs a C toolchain on every runner; force-enable it so
+      # platform defaults can't silently disable the parser package.
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Match the floor in go.mod; setup-go auto-installs newer toolchains
+          # via GOTOOLCHAIN when the module requires them.
+          go-version: '1.25'
+          check-latest: true
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go build (default)
+        run: go build ./...
+      - name: go build (encoder tag)
+        run: go build -tags encoder ./...
+      - name: go test
+        run: go test ./...
+      - name: go test (race)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./internal/pipeline/... ./internal/store/...

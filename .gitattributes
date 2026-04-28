@@ -1,0 +1,23 @@
+* text=auto eol=lf
+
+# Shell scripts must keep LF endings on every platform — CRLF makes Linux
+# runners reject the shebang with `bad interpreter: No such file or directory`.
+*.sh         text eol=lf
+*.bash       text eol=lf
+
+# YAML / Go / Markdown — LF everywhere for cross-platform consistency.
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.go         text eol=lf
+*.md         text eol=lf
+*.toml       text eol=lf
+
+# Windows-only files keep CRLF.
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+*.ps1        text eol=crlf
+
+# Treat tree-sitter prebuilt outputs as binary if any get committed.
+*.so         binary
+*.dll        binary
+*.dylib      binary

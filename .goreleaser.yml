@@ -1,0 +1,216 @@
+# .goreleaser.yml — codemap release configuration
+#
+# Prerequisites for a local snapshot build:
+#   brew install zig goreleaser       # macOS
+#   apt install zig && go install github.com/goreleaser/goreleaser/v2@latest   # Linux
+#
+# Local snapshot (no publish, no tag required):
+#   goreleaser release --snapshot --clean --skip=publish
+#
+# The CI workflow (release.yml) calls goreleaser automatically on v* tag push.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# CGO cross-compilation strategy
+# ─────────────────────────────────────────────────────────────────────────────
+# tree-sitter is a CGO dependency (smacker/go-tree-sitter links tree-sitter.c).
+# Standard Go cross-compilation (GOOS/GOARCH with CGO_ENABLED=1) requires a
+# matching C compiler per target. We use zig-cc as a universal cross-compiler:
+#
+#   CC="zig cc -target <zig-triple>"  GOOS=... GOARCH=... CGO_ENABLED=1 go build
+#
+# Zig triples used:
+#   darwin/amd64   → x86_64-macos
+#   darwin/arm64   → aarch64-macos
+#   linux/amd64    → x86_64-linux-musl   (musl → fully static binary)
+#   linux/arm64    → aarch64-linux-musl  (musl → fully static binary)
+#   windows/amd64  → x86_64-windows-gnu
+#
+# Linux static linking note:
+#   musl target produces a fully static binary. Verify after build with:
+#     ldd dist/codemap_linux_amd64_v1/codemap
+#     → "not a dynamic executable"  (or "statically linked")
+#   CGO_LDFLAGS="-static" is also passed for belt-and-suspenders.
+#
+# Windows static note:
+#   Windows does not fully support a static C runtime in the same way as
+#   Linux/musl. The zig-cc windows-gnu target statically links libgcc and
+#   libstdc++ but dynamically links the Windows CRT (msvcrt.dll), which ships
+#   with every Windows version ≥ Vista. This is the accepted minimal-dep
+#   approach for CGO Windows builds.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Adding a second build for the encoder variant (future)
+# ─────────────────────────────────────────────────────────────────────────────
+# Duplicate the builds block below and add:
+#   id: codemap-encoder
+#   binary: codemap-encoder
+#   tags: [encoder]
+# The encoder artifact will appear alongside the default binary in the release.
+# Wire ONNX runtime via CGO in onnx_enabled.go before enabling.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 2
+
+project_name: codemap
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+# ─── Build matrix ────────────────────────────────────────────────────────────
+builds:
+  - id: codemap
+    binary: codemap
+    main: ./cmd/codemap
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/devchan97/code-map/internal/cli.Version={{.Version}}
+      - -X github.com/devchan97/code-map/internal/cli.GitSHA={{.FullCommit}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Exclude unsupported combinations
+    ignore:
+      - goos: windows
+        goarch: arm64   # deferred; zig windows arm64 support is still maturing
+
+    # Per-target zig-cc cross-compiler overrides.
+    # GoReleaser sets GOOS/GOARCH per target; we map to a wrapper script.
+    #
+    # WHY WRAPPERS: when CC/CXX contain spaces (e.g. `zig cc -target ...`),
+    # CGO invokes them as a single executable path, drops the trailing args,
+    # and the linker fails to resolve libc symbols (`relocation target stderr
+    # not defined`, etc.). One-line bash wrappers in scripts/ bake the target
+    # triple in so CGO sees a single executable.
+    #
+    # The wrappers must be marked +x by the release workflow before goreleaser
+    # runs (see .github/workflows/release.yml).
+    overrides:
+      # ── darwin/amd64 ──────────────────────────────────────────────────────
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=./scripts/zigcc-darwin-amd64.sh
+          - CXX=./scripts/zigcxx-darwin-amd64.sh
+
+      # ── darwin/arm64 (Apple Silicon) ──────────────────────────────────────
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=./scripts/zigcc-darwin-arm64.sh
+          - CXX=./scripts/zigcxx-darwin-arm64.sh
+
+      # ── linux/amd64 (musl static) ─────────────────────────────────────────
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=./scripts/zigcc-linux-amd64.sh
+          - CXX=./scripts/zigcxx-linux-amd64.sh
+          - CGO_LDFLAGS=-static
+
+      # ── linux/arm64 (musl static) ─────────────────────────────────────────
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=./scripts/zigcc-linux-arm64.sh
+          - CXX=./scripts/zigcxx-linux-arm64.sh
+          - CGO_LDFLAGS=-static
+
+      # ── windows/amd64 ─────────────────────────────────────────────────────
+      # Static libgcc/libstdc++; MSVCRT (Windows CRT) is still dynamic —
+      # see file header note for rationale.
+      - goos: windows
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=./scripts/zigcc-windows-amd64.sh
+          - CXX=./scripts/zigcxx-windows-amd64.sh
+
+# ─── Archives ────────────────────────────────────────────────────────────────
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE*
+
+# ─── Checksums ───────────────────────────────────────────────────────────────
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# ─── Snapshot naming (goreleaser release --snapshot) ─────────────────────────
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+# ─── Changelog ───────────────────────────────────────────────────────────────
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+# ─── GitHub Release ──────────────────────────────────────────────────────────
+release:
+  github:
+    owner: devchan97
+    name: code-map
+  draft: false
+  prerelease: auto
+  # Marks pre-release automatically when Version contains "-rc", "-beta", etc.
+  name_template: "codemap {{.Version}}"
+
+# ─── Homebrew tap ────────────────────────────────────────────────────────────
+# Prerequisite: create the devchan97/homebrew-tap repository on GitHub and
+# add a HOMEBREW_TAP_TOKEN secret (GitHub PAT with repo write access) to the
+# code-map repo's Actions secrets.
+#
+# Once the tap repo exists, users can install with:
+#   brew install devchan97/tap/codemap
+brews:
+  - name: codemap
+    repository:
+      owner: devchan97
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/devchan97/code-map"
+    description: "Local code-retrieval CLI for coding agents (Claude Code, Codex)"
+    license: "MIT"
+    # Only include macOS bottles (darwin builds) in the Homebrew formula.
+    # Linux users install via `brew install` on Linuxbrew or directly via curl.
+    ids:
+      - codemap
+    install: |
+      bin.install "codemap"
+    test: |
+      system "#{bin}/codemap", "version"
+    commit_author:
+      name: goreleaser-bot
+      email: bot@goreleaser.com
+    commit_msg_template: "chore: bump codemap to {{.Version}}"

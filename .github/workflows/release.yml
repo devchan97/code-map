@@ -1,0 +1,77 @@
+name: release
+
+# Triggers on any tag matching v* (e.g. v0.1.0, v1.2.3-rc1).
+# Do NOT push v* tags manually for testing — use `goreleaser release --snapshot`
+# locally instead (see Makefile target `release-snapshot`).
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create the GitHub Release and upload assets
+
+jobs:
+  goreleaser:
+    name: GoReleaser
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout (full history so goreleaser can derive the git tag) ──
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Go toolchain ──────────────────────────────────────────────────
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+          cache: true
+
+      # ── 3. Zig (cross-compiler for CGO) ──────────────────────────────────
+      # zig-cc is used as a universal cross-compiler for all CGO targets
+      # (darwin, linux/musl, windows). See .goreleaser.yml for per-target triples.
+      #
+      # goto-bus-stop/setup-zig installs a pinned Zig release from ziglang.org
+      # and adds it to PATH. Any Zig 0.12+ works; pin to a specific release for
+      # reproducible builds.
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: '0.13.0'
+
+      # ── 3.5. Make zig-cc wrapper scripts executable ───────────────────────
+      # Git on Windows authors does not preserve the +x bit; force it on the
+      # runner before goreleaser invokes them as $CC / $CXX. See scripts/README.md
+      # for why these wrappers exist.
+      - name: chmod zigcc wrappers
+        run: chmod +x scripts/*.sh
+
+      # ── 4. Verify goreleaser config before building ───────────────────────
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
+
+      # ── 5. Run GoReleaser (build + publish) ──────────────────────────────
+      # GITHUB_TOKEN   — built-in; grants release write permission.
+      # HOMEBREW_TAP_TOKEN — PAT with `repo` scope on devchan97/homebrew-tap.
+      #                      Add this in: Settings → Secrets → Actions.
+      #                      If the tap repo does not yet exist, goreleaser will
+      #                      fail at the brew push step. Remove the `brews:` block
+      #                      from .goreleaser.yml (or set skip: true) until the
+      #                      homebrew-tap repo is created.
+      - name: run goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Set a dummy value so goreleaser templating doesn't fail when the
+          # secret is absent (e.g. forks). The brew push will still fail if
+          # the repo doesn't exist — that's expected until the tap is created.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || '' }}
