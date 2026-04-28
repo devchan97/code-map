@@ -80,12 +80,18 @@ jobs:
       #                      fail at the brew push step. Remove the `brews:` block
       #                      from .goreleaser.yml (or set skip: true) until the
       #                      homebrew-tap repo is created.
+      # --parallelism 1 forces goreleaser to build one target at a time. zig
+      # 0.13's compile-id cache directory is not safe under concurrent
+      # invocation even with per-target ZIG_LOCAL_CACHE_DIR — multiple .c
+      # translation units per target invoke separate zig processes that race
+      # within the same target's cache. Going serial removes the race entirely
+      # at the cost of ~2× build time. Total runtime stays under 6 minutes.
       - name: run goreleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean
+          args: release --clean --parallelism 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Set a dummy value so goreleaser templating doesn't fail when the
