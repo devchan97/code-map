@@ -22,4 +22,14 @@ ci: vet build
 #   ldd  dist/codemap_linux_amd64_v1/codemap   → "not a dynamic executable"
 release-snapshot:
 	chmod +x scripts/*.sh
+	sudo install -m 0755 scripts/zigcc-darwin-amd64.sh   /usr/local/bin/zigcc-darwin-amd64
+	sudo install -m 0755 scripts/zigcc-darwin-arm64.sh   /usr/local/bin/zigcc-darwin-arm64
+	sudo install -m 0755 scripts/zigcc-linux-amd64.sh    /usr/local/bin/zigcc-linux-amd64
+	sudo install -m 0755 scripts/zigcc-linux-arm64.sh    /usr/local/bin/zigcc-linux-arm64
+	sudo install -m 0755 scripts/zigcc-windows-amd64.sh  /usr/local/bin/zigcc-windows-amd64
+	sudo install -m 0755 scripts/zigcxx-darwin-amd64.sh  /usr/local/bin/zigcxx-darwin-amd64
+	sudo install -m 0755 scripts/zigcxx-darwin-arm64.sh  /usr/local/bin/zigcxx-darwin-arm64
+	sudo install -m 0755 scripts/zigcxx-linux-amd64.sh   /usr/local/bin/zigcxx-linux-amd64
+	sudo install -m 0755 scripts/zigcxx-linux-arm64.sh   /usr/local/bin/zigcxx-linux-arm64
+	sudo install -m 0755 scripts/zigcxx-windows-amd64.sh /usr/local/bin/zigcxx-windows-amd64
 	goreleaser release --snapshot --clean --skip=publish

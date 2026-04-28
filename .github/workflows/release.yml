@@ -40,12 +40,29 @@ jobs:
         with:
           version: '0.13.0'
 
-      # ── 3.5. Make zig-cc wrapper scripts executable ───────────────────────
-      # Git on Windows authors does not preserve the +x bit; force it on the
-      # runner before goreleaser invokes them as $CC / $CXX. See scripts/README.md
-      # for why these wrappers exist.
-      - name: chmod zigcc wrappers
-        run: chmod +x scripts/*.sh
+      # ── 3.5. Stage zig-cc wrappers in an absolute PATH-resolvable location ─
+      # Two requirements:
+      #   1. Git on Windows authors does not preserve the +x bit, so we chmod
+      #      after checkout.
+      #   2. Go 1.25+ refuses relative CC/CXX (`go: CC environment variable is
+      #      relative; must be absolute path`). Copying the wrappers to
+      #      /usr/local/bin/ gives them an absolute, PATH-resolvable path so
+      #      `.goreleaser.yml` can refer to them by basename.
+      - name: install zigcc wrappers
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          sudo install -m 0755 scripts/zigcc-darwin-amd64.sh    /usr/local/bin/zigcc-darwin-amd64
+          sudo install -m 0755 scripts/zigcc-darwin-arm64.sh    /usr/local/bin/zigcc-darwin-arm64
+          sudo install -m 0755 scripts/zigcc-linux-amd64.sh     /usr/local/bin/zigcc-linux-amd64
+          sudo install -m 0755 scripts/zigcc-linux-arm64.sh     /usr/local/bin/zigcc-linux-arm64
+          sudo install -m 0755 scripts/zigcc-windows-amd64.sh   /usr/local/bin/zigcc-windows-amd64
+          sudo install -m 0755 scripts/zigcxx-darwin-amd64.sh   /usr/local/bin/zigcxx-darwin-amd64
+          sudo install -m 0755 scripts/zigcxx-darwin-arm64.sh   /usr/local/bin/zigcxx-darwin-arm64
+          sudo install -m 0755 scripts/zigcxx-linux-amd64.sh    /usr/local/bin/zigcxx-linux-amd64
+          sudo install -m 0755 scripts/zigcxx-linux-arm64.sh    /usr/local/bin/zigcxx-linux-arm64
+          sudo install -m 0755 scripts/zigcxx-windows-amd64.sh  /usr/local/bin/zigcxx-windows-amd64
+          which zigcc-linux-amd64 zigcxx-linux-amd64
 
       # ── 4. Verify goreleaser config before building ───────────────────────
       - name: goreleaser check

@@ -84,7 +84,8 @@ builds:
         goarch: arm64   # deferred; zig windows arm64 support is still maturing
 
     # Per-target zig-cc cross-compiler overrides.
-    # GoReleaser sets GOOS/GOARCH per target; we map to a wrapper script.
+    # GoReleaser sets GOOS/GOARCH per target; we map to a wrapper installed
+    # at /usr/local/bin/zigcc-<target> by the release workflow.
     #
     # WHY WRAPPERS: when CC/CXX contain spaces (e.g. `zig cc -target ...`),
     # CGO invokes them as a single executable path, drops the trailing args,
@@ -92,32 +93,35 @@ builds:
     # not defined`, etc.). One-line bash wrappers in scripts/ bake the target
     # triple in so CGO sees a single executable.
     #
-    # The wrappers must be marked +x by the release workflow before goreleaser
-    # runs (see .github/workflows/release.yml).
+    # WHY ABSOLUTE PATHS: Go 1.25+ rejects relative CC/CXX values
+    # (`go: CC environment variable is relative; must be absolute path`).
+    # The release workflow installs each wrapper to /usr/local/bin/ so the
+    # absolute path is stable and PATH-resolvable. For local snapshot builds,
+    # see Makefile (release-snapshot target also installs them).
     overrides:
       # ── darwin/amd64 ──────────────────────────────────────────────────────
       - goos: darwin
         goarch: amd64
         env:
           - CGO_ENABLED=1
-          - CC=./scripts/zigcc-darwin-amd64.sh
-          - CXX=./scripts/zigcxx-darwin-amd64.sh
+          - CC=/usr/local/bin/zigcc-darwin-amd64
+          - CXX=/usr/local/bin/zigcxx-darwin-amd64
 
       # ── darwin/arm64 (Apple Silicon) ──────────────────────────────────────
       - goos: darwin
         goarch: arm64
         env:
           - CGO_ENABLED=1
-          - CC=./scripts/zigcc-darwin-arm64.sh
-          - CXX=./scripts/zigcxx-darwin-arm64.sh
+          - CC=/usr/local/bin/zigcc-darwin-arm64
+          - CXX=/usr/local/bin/zigcxx-darwin-arm64
 
       # ── linux/amd64 (musl static) ─────────────────────────────────────────
       - goos: linux
         goarch: amd64
         env:
           - CGO_ENABLED=1
-          - CC=./scripts/zigcc-linux-amd64.sh
-          - CXX=./scripts/zigcxx-linux-amd64.sh
+          - CC=/usr/local/bin/zigcc-linux-amd64
+          - CXX=/usr/local/bin/zigcxx-linux-amd64
           - CGO_LDFLAGS=-static
 
       # ── linux/arm64 (musl static) ─────────────────────────────────────────
@@ -125,8 +129,8 @@ builds:
         goarch: arm64
         env:
           - CGO_ENABLED=1
-          - CC=./scripts/zigcc-linux-arm64.sh
-          - CXX=./scripts/zigcxx-linux-arm64.sh
+          - CC=/usr/local/bin/zigcc-linux-arm64
+          - CXX=/usr/local/bin/zigcxx-linux-arm64
           - CGO_LDFLAGS=-static
 
       # ── windows/amd64 ─────────────────────────────────────────────────────
@@ -136,8 +140,8 @@ builds:
         goarch: amd64
         env:
           - CGO_ENABLED=1
-          - CC=./scripts/zigcc-windows-amd64.sh
-          - CXX=./scripts/zigcxx-windows-amd64.sh
+          - CC=/usr/local/bin/zigcc-windows-amd64
+          - CXX=/usr/local/bin/zigcxx-windows-amd64
 
 # ─── Archives ────────────────────────────────────────────────────────────────
 archives:
