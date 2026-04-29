@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/devchan97/code-map/internal/core"
@@ -38,11 +39,35 @@ type DataSource interface {
 }
 
 // graphNode is the vis-network node shape injected into the template.
+// Locations, Snippet, and Outgoing are non-vis fields read by the aside
+// panel script when a node is selected; vis-network ignores unknown keys.
 type graphNode struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-	Group string `json:"group"`
-	Title string `json:"title"`
+	ID        string         `json:"id"`
+	Label     string         `json:"label"`
+	Group     string         `json:"group"`
+	Title     string         `json:"title"`
+	Locations []nodeLocation `json:"locations"`
+	Snippet   string         `json:"snippet"`
+	// Outgoing lists every edge whose FromQualname matches this node's id,
+	// regardless of whether the target was resolved to an in-graph node.
+	// Lets the aside surface external references (stdlib calls, unresolved
+	// callees) that the canvas necessarily filters out.
+	Outgoing []nodeOutgoing `json:"outgoing"`
+}
+
+// nodeOutgoing is one outgoing edge from a node, kept whether or not the
+// target qualname resolves to a known symbol in this index.
+type nodeOutgoing struct {
+	To       string `json:"to"`
+	Kind     string `json:"kind"`
+	Resolved bool   `json:"resolved"`
+}
+
+// nodeLocation is one occurrence of a (possibly merged) qualname.
+type nodeLocation struct {
+	File      string `json:"file"`
+	LineStart int    `json:"line_start"`
+	LineEnd   int    `json:"line_end"`
 }
 
 // graphEdge is the vis-network edge shape injected into the template.
@@ -101,27 +126,83 @@ func Render(ctx context.Context, ds DataSource, repoRoot string, opts Options) (
 		return "", fmt.Errorf("visualize: read edges: %w", err)
 	}
 
-	// 5. Build nodes; index qualnames for endpoint filtering.
-	nodeSet := make(map[string]struct{}, len(symbols))
-	nodes := make([]graphNode, 0, len(symbols))
-	for _, s := range symbols {
-		nodeSet[s.Qualname] = struct{}{}
-		nodes = append(nodes, graphNode{
-			ID:    s.Qualname,
-			Label: s.Name,
-			Group: string(s.Kind),
-			Title: fmt.Sprintf("%s:%d-%d", s.File, s.LineStart, s.LineEnd),
+	// 5a. Group every edge by from-qualname so the aside can show
+	// outgoing references (resolved or not) for any node, even when the
+	// canvas filters out unresolved targets.
+	outByFrom := make(map[string][]nodeOutgoing, len(allEdges))
+	for _, e := range allEdges {
+		outByFrom[e.FromQualname] = append(outByFrom[e.FromQualname], nodeOutgoing{
+			To: e.ToQualname, Kind: string(e.Kind), Resolved: e.Resolved,
 		})
 	}
 
-	// 6. Build edges; skip any whose endpoints are not in the node set.
+	// 5. Build nodes; index qualnames for endpoint filtering.
+	//
+	// vis-network's DataSet rejects duplicate ids with
+	//   "Cannot add item: item with id <x> already exists"
+	// and stops loading the remaining nodes — leaving the canvas blank.
+	// Edges are keyed by qualname (see core.Edge), so the node id must also
+	// be the qualname; when two symbols share a qualname (common when a
+	// parser is in scaffold state and emits one file-level symbol per file
+	// using the basename) we collapse them into a single node and append
+	// the additional locations to the tooltip rather than producing a
+	// duplicate id. Once parsers emit fully-qualified names (pkg.Func),
+	// collisions disappear naturally.
+	nodeSet := make(map[string]int, len(symbols))
+	nodes := make([]graphNode, 0, len(symbols))
+	for _, s := range symbols {
+		loc := nodeLocation{File: s.File, LineStart: s.LineStart, LineEnd: s.LineEnd}
+		locStr := fmt.Sprintf("%s:%d-%d", s.File, s.LineStart, s.LineEnd)
+		if idx, dup := nodeSet[s.Qualname]; dup {
+			nodes[idx].Title += "\n" + locStr
+			nodes[idx].Locations = append(nodes[idx].Locations, loc)
+			continue
+		}
+		nodeSet[s.Qualname] = len(nodes)
+		nodes = append(nodes, graphNode{
+			ID:        s.Qualname,
+			Label:     s.Name,
+			Group:     string(s.Kind),
+			Title:     locStr,
+			Locations: []nodeLocation{loc},
+			Snippet:   s.Snippet,
+			Outgoing:  outByFrom[s.Qualname],
+		})
+	}
+
+	// 6. Build edges.
+	//
+	// Policy: an edge whose `from` is in the node set is always rendered.
+	// If the `to` endpoint is not in the node set (the common case for
+	// language stdlib calls and parser-unresolved targets) we synthesize
+	// a placeholder external node so the connection is still visible.
+	// This keeps the canvas honest about real call relationships even
+	// when the parser/resolver cannot map a target back to a known
+	// internal symbol; the dashed style flags the link as unresolved.
+	//
+	// Edges with `from` outside the node set are dropped — without an
+	// origin to anchor on they would only add noise.
 	edges := make([]graphEdge, 0, len(allEdges))
+	externals := make(map[string]int)
 	for _, e := range allEdges {
 		if _, ok := nodeSet[e.FromQualname]; !ok {
 			continue
 		}
 		if _, ok := nodeSet[e.ToQualname]; !ok {
-			continue
+			if _, seen := externals[e.ToQualname]; !seen {
+				externals[e.ToQualname] = len(nodes)
+				label := e.ToQualname
+				if i := strings.LastIndex(label, "."); i >= 0 {
+					label = label[i+1:]
+				}
+				nodes = append(nodes, graphNode{
+					ID:    e.ToQualname,
+					Label: label,
+					Group: "external",
+					Title: e.ToQualname + "\n(external — not in this index)",
+				})
+				nodeSet[e.ToQualname] = externals[e.ToQualname]
+			}
 		}
 		edges = append(edges, graphEdge{
 			From:   e.FromQualname,

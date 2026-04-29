@@ -1,67 +1,845 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <title>codemap — {{.RepoName}}</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
   <style>
+    /* ─── Design tokens (Anthropic-inspired warm neutral palette) ────────── */
+    :root {
+      --bg:           #FAF9F5;
+      --bg-elev:      #FFFFFF;
+      --bg-subtle:    #F0EEE6;
+      --border:       #E5E1D8;
+      --border-soft:  #ECE9E0;
+      --fg:           #1F1E1D;
+      --fg-muted:     #5C5A56;
+      --fg-subtle:    #8A857C;
+      --accent:       #CC785C;
+      --accent-soft:  #E9D9CC;
+      --accent-fg:    #FFFFFF;
+      --node-fn:      #CC785C;
+      --node-class:   #6B7B8C;
+      --node-var:     #A89B85;
+      --node-other:   #B8AFA0;
+      --node-external:#D6CFC0;
+      --edge:         #B8B0A0;
+      --edge-soft:    #D6CFC0;
+      --shadow:       0 1px 0 rgba(31, 30, 29, 0.04);
+      --shadow-lg:    0 6px 24px rgba(31, 30, 29, 0.08);
+      --radius:       6px;
+      --radius-lg:    10px;
+      --font-sans:    "Söhne", "Söhne Buch", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --font-mono:    "Söhne Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    [data-theme="dark"] {
+      --bg:           #1F1E1D;
+      --bg-elev:      #262524;
+      --bg-subtle:    #2D2C2A;
+      --border:       #3A3835;
+      --border-soft:  #2F2D2B;
+      --fg:           #F0EEE6;
+      --fg-muted:     #B8B3A8;
+      --fg-subtle:    #807B72;
+      --accent:       #D88E72;
+      --accent-soft:  #3A2F28;
+      --accent-fg:    #1F1E1D;
+      --node-fn:      #D88E72;
+      --node-class:   #8AA0B5;
+      --node-var:     #B0A48F;
+      --node-other:   #807B72;
+      --node-external:#45413C;
+      --edge:         #5C5852;
+      --edge-soft:    #45413C;
+      --shadow:       0 1px 0 rgba(0, 0, 0, 0.2);
+      --shadow-lg:    0 6px 24px rgba(0, 0, 0, 0.4);
+    }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, sans-serif; background: #f5f5f5; }
-    header {
+    html, body { height: 100%; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--fg);
       display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      letter-spacing: -0.005em;
+    }
+
+    /* ─── Header ─────────────────────────────────────────────────────────── */
+    header {
+      flex: 0 0 64px;
+      display: flex;
       align-items: center;
-      padding: 0.75rem 1.25rem;
-      background: #fff;
-      border-bottom: 1px solid #ddd;
-      height: 80px;
+      gap: 2rem;
+      padding: 0 1.5rem;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      box-shadow: var(--shadow);
     }
-    header .field { display: flex; flex-direction: column; }
-    header .label { font-size: 0.65rem; text-transform: uppercase; color: #888; }
-    header .value { font-size: 0.9rem; color: #222; font-weight: 500; }
+    header .brand {
+      font-weight: 600;
+      font-size: 0.95rem;
+      letter-spacing: -0.01em;
+      color: var(--fg);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    header .brand::before {
+      content: "";
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    header .meta {
+      display: flex;
+      gap: 1.75rem;
+      flex: 1;
+      overflow: hidden;
+    }
+    header .field { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    header .label {
+      font-size: 0.65rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--fg-subtle);
+      font-weight: 500;
+    }
+    header .value {
+      font-size: 0.85rem;
+      color: var(--fg);
+      font-weight: 500;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
+    }
+    .theme-toggle {
+      appearance: none;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--fg-muted);
+      width: 36px; height: 36px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+      font-size: 1rem;
+    }
+    .theme-toggle:hover {
+      background: var(--bg-subtle);
+      color: var(--fg);
+      border-color: var(--fg-subtle);
+    }
+
+    /* ─── Layout ─────────────────────────────────────────────────────────── */
+    main {
+      flex: 1 1 auto;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      min-height: 0;
+      background: var(--bg);
+    }
+    .canvas-wrap {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      height: 100%;
+      border-right: 1px solid var(--border);
+    }
     #graph {
+      background: var(--bg);
       width: 100%;
-      height: calc(100vh - 80px);
-      border: 1px solid #ccc;
-      background: #fff;
+      height: 100%;
     }
+
+    /* ─── Floating search box ────────────────────────────────────────────── */
+    .search {
+      position: absolute;
+      top: 1rem;
+      left: 1rem;
+      width: 320px;
+      max-width: calc(100% - 2rem);
+      z-index: 10;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-lg);
+      overflow: hidden;
+      transition: box-shadow 150ms ease;
+    }
+    .search:focus-within { box-shadow: var(--shadow-lg), 0 0 0 3px var(--accent-soft); }
+    .search-input-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.55rem 0.75rem;
+    }
+    .search-icon {
+      color: var(--fg-subtle);
+      font-size: 0.85rem;
+      flex: 0 0 auto;
+    }
+    .search input {
+      flex: 1;
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: var(--fg);
+      font-family: var(--font-sans);
+      font-size: 0.875rem;
+      outline: none;
+      letter-spacing: -0.005em;
+    }
+    .search input::placeholder { color: var(--fg-subtle); }
+    .search-clear {
+      appearance: none;
+      background: transparent;
+      border: none;
+      color: var(--fg-subtle);
+      cursor: pointer;
+      font-size: 0.95rem;
+      padding: 0 0.25rem;
+      display: none;
+    }
+    .search-clear:hover { color: var(--fg); }
+    .search.has-query .search-clear { display: inline-block; }
+    .search-results {
+      max-height: 320px;
+      overflow-y: auto;
+      border-top: 1px solid var(--border-soft);
+      display: none;
+    }
+    .search.open .search-results { display: block; }
+    .search-result {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .search-result:last-child { border-bottom: none; }
+    .search-result:hover, .search-result.active {
+      background: var(--bg-subtle);
+    }
+    .search-result .name {
+      font-size: 0.85rem;
+      color: var(--fg);
+      font-weight: 500;
+    }
+    .search-result .name mark {
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 0 1px;
+      border-radius: 2px;
+    }
+    .search-result .qn {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--fg-subtle);
+      word-break: break-all;
+    }
+    .search-empty {
+      padding: 0.65rem 0.75rem;
+      font-size: 0.8rem;
+      color: var(--fg-subtle);
+    }
+
+    /* ─── vis-network overrides ──────────────────────────────────────────── */
+    .vis-tooltip {
+      background: var(--bg-elev) !important;
+      color: var(--fg) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: var(--radius) !important;
+      font-family: var(--font-mono) !important;
+      font-size: 0.72rem !important;
+      padding: 0.4rem 0.55rem !important;
+      box-shadow: var(--shadow-lg) !important;
+      white-space: pre !important;
+    }
+
+    /* ─── Aside detail panel ─────────────────────────────────────────────── */
+    aside {
+      background: var(--bg-elev);
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 1.5rem 1.5rem 2rem;
+      font-size: 0.875rem;
+      line-height: 1.55;
+      min-height: 0;
+      height: 100%;
+      color: var(--fg);
+    }
+    aside .empty {
+      color: var(--fg-subtle);
+      font-size: 0.85rem;
+      padding-top: 0.5rem;
+    }
+    aside h2 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      margin-bottom: 0.4rem;
+      word-break: break-all;
+      color: var(--fg);
+    }
+    aside .kind {
+      display: inline-block;
+      font-size: 0.65rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-soft);
+      padding: 0.18rem 0.5rem;
+      border-radius: 999px;
+      font-weight: 500;
+      margin-bottom: 1.25rem;
+    }
+    aside section { margin-top: 1.25rem; }
+    aside section:first-of-type { margin-top: 0; }
+    aside section h3 {
+      font-size: 0.65rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--fg-subtle);
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+    }
+    aside section h3 .count { color: var(--fg-subtle); font-weight: 400; }
+    aside .qualname {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      word-break: break-all;
+      color: var(--fg);
+      background: var(--bg-subtle);
+      padding: 0.5rem 0.65rem;
+      border-radius: var(--radius);
+      border: 1px solid var(--border-soft);
+    }
+    aside ul.locations { list-style: none; display: flex; flex-direction: column; gap: 0.25rem; }
+    aside ul.locations li {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--fg-muted);
+      word-break: break-all;
+      padding: 0.3rem 0.5rem;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius);
+    }
+    aside ul.outgoing { list-style: none; display: flex; flex-direction: column; gap: 0.2rem; }
+    aside ul.outgoing li {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--fg);
+      padding: 0.28rem 0.5rem;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius);
+      word-break: break-all;
+    }
+    aside ul.outgoing li.unresolved { color: var(--fg-muted); }
+    aside ul.outgoing li.resolved { cursor: pointer; }
+    aside ul.outgoing li.resolved:hover { border-color: var(--accent); }
+    aside ul.outgoing .kind-tag {
+      flex: 0 0 auto;
+      font-size: 0.62rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--fg-subtle);
+      background: var(--bg-elev);
+      padding: 0.05rem 0.4rem;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      font-family: var(--font-sans);
+    }
+    aside ul.outgoing li.resolved .kind-tag { color: var(--accent); border-color: var(--accent-soft); }
+    aside ul.outgoing .target { flex: 1; min-width: 0; }
+    aside pre.snippet {
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius);
+      padding: 0.85rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.5;
+      /* pre-wrap so long lines wrap inside the aside instead of clipping
+         under a horizontal scrollbar; tab-size keeps indented code aligned. */
+      white-space: pre-wrap;
+      word-break: break-word;
+      tab-size: 2;
+      color: var(--fg);
+    }
+
+    /* ─── Scrollbars ─────────────────────────────────────────────────────── */
+    aside::-webkit-scrollbar, pre.snippet::-webkit-scrollbar,
+    .search-results::-webkit-scrollbar { width: 8px; height: 8px; }
+    aside::-webkit-scrollbar-thumb, pre.snippet::-webkit-scrollbar-thumb,
+    .search-results::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
+    aside::-webkit-scrollbar-thumb:hover, pre.snippet::-webkit-scrollbar-thumb:hover,
+    .search-results::-webkit-scrollbar-thumb:hover { background: var(--fg-subtle); }
+    aside::-webkit-scrollbar-track, pre.snippet::-webkit-scrollbar-track,
+    .search-results::-webkit-scrollbar-track { background: transparent; }
   </style>
 </head>
 <body>
   <header>
-    <div class="field">
-      <span class="label">Repo</span>
-      <span class="value" title="{{.RepoPath}}">{{.RepoName}}</span>
+    <div class="brand" title="{{.RepoPath}}">codemap · {{.RepoName}}</div>
+    <div class="meta">
+      <div class="field">
+        <span class="label">Last Indexed</span>
+        <span class="value">{{.LastIndexed}}</span>
+      </div>
+      <div class="field">
+        <span class="label">Files</span>
+        <span class="value">{{.FileCount}}</span>
+      </div>
+      <div class="field">
+        <span class="label">Symbols</span>
+        <span class="value">{{.SymbolCount}}</span>
+      </div>
+      <div class="field">
+        <span class="label">Edges</span>
+        <span class="value">{{.EdgeCount}}</span>
+      </div>
     </div>
-    <div class="field">
-      <span class="label">Last Indexed</span>
-      <span class="value">{{.LastIndexed}}</span>
-    </div>
-    <div class="field">
-      <span class="label">Files</span>
-      <span class="value">{{.FileCount}}</span>
-    </div>
-    <div class="field">
-      <span class="label">Symbols</span>
-      <span class="value">{{.SymbolCount}}</span>
-    </div>
-    <div class="field">
-      <span class="label">Edges</span>
-      <span class="value">{{.EdgeCount}}</span>
-    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="Toggle dark mode" title="Toggle theme">◐</button>
   </header>
-  <div id="graph"></div>
+  <main>
+    <div class="canvas-wrap">
+      <div class="search" id="search">
+        <div class="search-input-row">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input id="searchInput" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="Search symbols by name or qualname…" aria-label="Search symbols">
+          <button class="search-clear" id="searchClear" type="button" aria-label="Clear search">✕</button>
+        </div>
+        <div class="search-results" id="searchResults"></div>
+      </div>
+      <div id="graph"></div>
+    </div>
+    <aside id="detail">
+      <p class="empty">Select a node to inspect its symbol, locations, and snippet.</p>
+    </aside>
+  </main>
   <script>
-    const data = {
-      nodes: {{.NodesJSON}},
-      edges: {{.EdgesJSON}}
-    };
-    const network = new vis.Network(
+    /* ─── Theme: respect OS, persist user override ─────────────────────── */
+    const THEME_KEY = 'codemap-theme';
+    const root = document.documentElement;
+    function applyTheme(t) { root.setAttribute('data-theme', t); }
+    function currentTheme() {
+      return localStorage.getItem(THEME_KEY)
+        || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    }
+    applyTheme(currentTheme());
+    document.getElementById('themeToggle').addEventListener('click', () => {
+      const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+      restyleNetwork();
+    });
+
+    function cssVar(name) {
+      return getComputedStyle(root).getPropertyValue(name).trim();
+    }
+
+    /* ─── Build vis-network with themed colors ─────────────────────────── */
+    const rawNodes = {{.NodesJSON}};
+    const rawEdges = {{.EdgesJSON}};
+
+    function nodeColorByGroup(group) {
+      switch (group) {
+        case 'function':
+        case 'method':   return cssVar('--node-fn');
+        case 'class':    return cssVar('--node-class');
+        case 'variable':
+        case 'constant': return cssVar('--node-var');
+        case 'external': return cssVar('--node-external');
+        default:         return cssVar('--node-other');
+      }
+    }
+    function nodeSizeByGroup(group) {
+      return group === 'external' ? 6 : 12;
+    }
+
+    function buildOptions() {
+      return {
+        nodes: {
+          shape: 'dot',
+          size: 12,
+          borderWidth: 0,
+          font: {
+            face: cssVar('--font-sans').replace(/"/g, '') || 'system-ui, sans-serif',
+            size: 13,
+            color: cssVar('--fg-muted'),
+          },
+        },
+        edges: {
+          color: { color: cssVar('--edge'), highlight: cssVar('--accent'), inherit: false },
+          width: 1,
+          smooth: { type: 'continuous', roundness: 0.4 },
+          arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+          font: {
+            face: cssVar('--font-sans').replace(/"/g, '') || 'system-ui, sans-serif',
+            size: 10,
+            color: cssVar('--fg-subtle'),
+            background: cssVar('--bg-elev'),
+            strokeWidth: 0,
+          },
+        },
+        physics: {
+          stabilization: { iterations: 200 },
+          barnesHut: { gravitationalConstant: -2400, springLength: 130, springConstant: 0.04 },
+        },
+        interaction: { hover: true, tooltipDelay: 150 },
+      };
+    }
+
+    function colorize(nodes) {
+      return nodes.map(n => ({
+        ...n,
+        size: nodeSizeByGroup(n.group),
+        color: {
+          background: nodeColorByGroup(n.group),
+          border:     nodeColorByGroup(n.group),
+          highlight:  { background: cssVar('--accent'), border: cssVar('--accent') },
+          hover:      { background: cssVar('--accent'), border: cssVar('--accent') },
+        },
+        font: n.group === 'external'
+          ? { face: cssVar('--font-sans').replace(/"/g, '') || 'system-ui', size: 10, color: cssVar('--fg-subtle') }
+          : undefined,
+      }));
+    }
+
+    let network;
+    function restyleNetwork() {
+      if (!network) return;
+      network.setOptions(buildOptions());
+      const data = network.body.data;
+      data.nodes.update(colorize(rawNodes));
+    }
+
+    // Edges start hidden — the canvas would be unreadable with thousands of
+    // arrows by default. Selecting a node adds only its incident edges; the
+    // raw set is kept on `rawEdges` and indexed below for fast lookup.
+    network = new vis.Network(
       document.getElementById('graph'),
-      data,
-      { nodes: { shape: 'dot', size: 10 }, physics: { stabilization: true } }
+      { nodes: colorize(rawNodes), edges: [] },
+      buildOptions()
     );
+
+    /* ─── Aside detail panel ───────────────────────────────────────────── */
+    const nodeById = new Map(rawNodes.map(n => [n.id, n]));
+    const detail = document.getElementById('detail');
+
+    /* ─── Focus mode: only show edges of the clicked node ──────────────── */
+    // Index every edge by its endpoints so a node click can pull just its
+    // incident edges in O(deg(n)). Also index 1-hop neighbor node ids so we
+    // can softly fade unrelated nodes — keeps the surrounding context legible
+    // without leaving every arrow on the canvas.
+    const edgesByNode = new Map();   // node id -> Edge[]
+    const neighbors   = new Map();   // node id -> Set<node id> (incl. self)
+    for (const n of rawNodes) {
+      edgesByNode.set(n.id, []);
+      neighbors.set(n.id, new Set([n.id]));
+    }
+    rawEdges.forEach((e, idx) => {
+      // Assign a stable vis-network edge id so add/remove can target it.
+      if (e.id === undefined) e.id = 'e' + idx;
+      if (edgesByNode.has(e.from)) edgesByNode.get(e.from).push(e);
+      if (edgesByNode.has(e.to))   edgesByNode.get(e.to).push(e);
+      const a = neighbors.get(e.from), b = neighbors.get(e.to);
+      if (a) a.add(e.to);
+      if (b) b.add(e.from);
+    });
+    let focusedId = null;
+    let activeEdgeIds = [];          // currently in the DataSet
+    const DIM_OPACITY = 0.18;
+
+    // vis-network 9.x has no per-node `opacity`; fade by mixing the node
+    // color with the page background. Cheap RGB mix is enough.
+    function hexToRgb(hex) {
+      const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex.trim());
+      if (!m) return { r: 200, g: 200, b: 200 };
+      return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+    }
+    function fadeColor(hex, alpha) {
+      const fg = hexToRgb(hex);
+      const bg = hexToRgb(cssVar('--bg') || '#FAF9F5');
+      const r = Math.round(fg.r * alpha + bg.r * (1 - alpha));
+      const g = Math.round(fg.g * alpha + bg.g * (1 - alpha));
+      const b = Math.round(fg.b * alpha + bg.b * (1 - alpha));
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    function escapeHTML(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+
+    function renderEmpty() {
+      detail.innerHTML = '<p class="empty">Select a node to inspect its symbol, locations, and snippet.</p>';
+    }
+
+    function renderNode(node) {
+      const locs = (node.locations || [])
+        .map(l => `<li>${escapeHTML(l.file)}:${l.line_start}-${l.line_end}</li>`)
+        .join('');
+      const out = (node.outgoing || []);
+      const outItems = out.map(o => {
+        const cls = o.resolved ? 'resolved' : 'unresolved';
+        const dataAttr = o.resolved ? ` data-target="${escapeHTML(o.to)}"` : '';
+        return `<li class="${cls}"${dataAttr}>
+          <span class="kind-tag">${escapeHTML(o.kind)}</span>
+          <span class="target">${escapeHTML(o.to)}</span>
+        </li>`;
+      }).join('');
+      const outSection = out.length
+        ? `<section><h3>Outgoing references <span class="count">· ${out.length}</span></h3>
+             <ul class="outgoing">${outItems}</ul></section>`
+        : '';
+      const snippetSection = node.snippet
+        ? `<section><h3>Snippet</h3><pre class="snippet">${escapeHTML(node.snippet)}</pre></section>`
+        : '';
+      detail.innerHTML = `
+        <h2>${escapeHTML(node.label)}</h2>
+        <span class="kind">${escapeHTML(node.group || 'symbol')}</span>
+        <section>
+          <h3>Qualname</h3>
+          <div class="qualname">${escapeHTML(node.id)}</div>
+        </section>
+        <section>
+          <h3>Locations <span class="count">· ${(node.locations || []).length}</span></h3>
+          <ul class="locations">${locs}</ul>
+        </section>
+        ${outSection}
+        ${snippetSection}
+      `;
+      detail.querySelectorAll('ul.outgoing li.resolved').forEach(li => {
+        li.addEventListener('click', () => focusNode(li.dataset.target));
+      });
+    }
+
+    function focusNode(id) {
+      if (!nodeById.has(id)) return;
+      // vis-network suppresses the selectNode event for programmatic
+      // selectNodes() calls, so trigger the same render+edge-show pipeline
+      // by hand. Keeps search/aside-link/canvas-click behaviorally identical.
+      network.selectNodes([id]);
+      network.focus(id, { scale: 1.2, animation: { duration: 400, easingFunction: 'easeInOutQuad' } });
+      renderNode(nodeById.get(id));
+      applyFocus(id);
+    }
+
+    function applyFocus(id) {
+      if (!network) return;
+      const data = network.body.data;
+      const keep = neighbors.get(id);
+      const incident = edgesByNode.get(id) || [];
+      if (!keep) return;
+
+      // Swap edge dataset: remove the previously shown set, add this node's.
+      if (activeEdgeIds.length) data.edges.remove(activeEdgeIds);
+      const accent = cssVar('--accent');
+      const edgesToShow = incident.map(e => ({
+        ...e,
+        color: { color: accent, highlight: accent },
+        width: 1.5,
+      }));
+      data.edges.add(edgesToShow);
+      activeEdgeIds = incident.map(e => e.id);
+
+      // Soft-fade the non-neighborhood so the user can still scan around
+      // without losing the entire graph.
+      const nodeUpdates = rawNodes.map(n => {
+        const baseHex = nodeColorByGroup(n.group);
+        if (keep.has(n.id)) {
+          return {
+            id: n.id,
+            color: {
+              background: baseHex,
+              border: baseHex,
+              highlight: { background: accent, border: accent },
+              hover:     { background: accent, border: accent },
+            },
+            font: undefined,
+          };
+        }
+        const dim = fadeColor(baseHex, DIM_OPACITY);
+        return {
+          id: n.id,
+          color: {
+            background: dim, border: dim,
+            highlight: { background: dim, border: dim },
+            hover:     { background: dim, border: dim },
+          },
+          font: { color: fadeColor(cssVar('--fg-muted'), 0.35), size: n.group === 'external' ? 8 : 10 },
+        };
+      });
+      data.nodes.update(nodeUpdates);
+      focusedId = id;
+    }
+
+    function clearFocus() {
+      if (!network || focusedId === null) return;
+      const data = network.body.data;
+      if (activeEdgeIds.length) {
+        data.edges.remove(activeEdgeIds);
+        activeEdgeIds = [];
+      }
+      // Restore node colors from the original colorize() palette.
+      data.nodes.update(colorize(rawNodes).map(n => ({ id: n.id, color: n.color, font: n.font })));
+      focusedId = null;
+    }
+
+    network.on('selectNode', params => {
+      const id = params.nodes[0];
+      const node = nodeById.get(id);
+      if (node) {
+        renderNode(node);
+        applyFocus(id);
+      }
+    });
+    network.on('deselectNode', () => {
+      renderEmpty();
+      clearFocus();
+    });
+
+    /* ─── Search ───────────────────────────────────────────────────────── */
+    const searchEl = document.getElementById('search');
+    const searchInput = document.getElementById('searchInput');
+    const searchClear = document.getElementById('searchClear');
+    const searchResults = document.getElementById('searchResults');
+    const MAX_RESULTS = 50;
+    let activeIdx = -1;
+    let currentMatches = [];
+
+    function highlight(text, query) {
+      if (!query) return escapeHTML(text);
+      const idx = text.toLowerCase().indexOf(query.toLowerCase());
+      if (idx < 0) return escapeHTML(text);
+      return escapeHTML(text.slice(0, idx))
+        + '<mark>' + escapeHTML(text.slice(idx, idx + query.length)) + '</mark>'
+        + escapeHTML(text.slice(idx + query.length));
+    }
+
+    function runSearch(q) {
+      const query = q.trim().toLowerCase();
+      if (!query) {
+        searchEl.classList.remove('open', 'has-query');
+        currentMatches = [];
+        activeIdx = -1;
+        return;
+      }
+      searchEl.classList.add('has-query');
+      const matches = [];
+      for (const n of rawNodes) {
+        const nameLow = (n.label || '').toLowerCase();
+        const qnLow = (n.id || '').toLowerCase();
+        if (nameLow.includes(query) || qnLow.includes(query)) {
+          // Rank: name prefix > name contains > qualname contains.
+          let rank = 3;
+          if (nameLow.startsWith(query)) rank = 1;
+          else if (nameLow.includes(query)) rank = 2;
+          matches.push({ node: n, rank });
+          if (matches.length >= MAX_RESULTS * 4) break;
+        }
+      }
+      matches.sort((a, b) => a.rank - b.rank || a.node.label.length - b.node.label.length);
+      currentMatches = matches.slice(0, MAX_RESULTS).map(m => m.node);
+      activeIdx = currentMatches.length ? 0 : -1;
+      renderResults(query);
+      searchEl.classList.add('open');
+    }
+
+    function renderResults(query) {
+      if (!currentMatches.length) {
+        searchResults.innerHTML = `<div class="search-empty">No symbols match "${escapeHTML(query)}".</div>`;
+        return;
+      }
+      searchResults.innerHTML = currentMatches.map((n, i) => `
+        <div class="search-result${i === activeIdx ? ' active' : ''}" data-id="${escapeHTML(n.id)}">
+          <span class="name">${highlight(n.label || '', query)}</span>
+          <span class="qn">${highlight(n.id || '', query)}</span>
+        </div>
+      `).join('');
+      searchResults.querySelectorAll('.search-result').forEach((el, i) => {
+        el.addEventListener('click', () => {
+          activeIdx = i;
+          pickActive();
+        });
+        el.addEventListener('mouseenter', () => {
+          activeIdx = i;
+          searchResults.querySelectorAll('.search-result').forEach((x, j) =>
+            x.classList.toggle('active', j === activeIdx));
+        });
+      });
+    }
+
+    function pickActive() {
+      if (activeIdx < 0 || activeIdx >= currentMatches.length) return;
+      const id = currentMatches[activeIdx].id;
+      focusNode(id);
+      searchEl.classList.remove('open');
+      searchInput.blur();
+    }
+
+    searchInput.addEventListener('input', e => runSearch(e.target.value));
+    searchInput.addEventListener('focus', () => {
+      if (currentMatches.length) searchEl.classList.add('open');
+    });
+    searchInput.addEventListener('keydown', e => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (currentMatches.length) {
+          activeIdx = (activeIdx + 1) % currentMatches.length;
+          renderResults(searchInput.value.trim());
+        }
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (currentMatches.length) {
+          activeIdx = (activeIdx - 1 + currentMatches.length) % currentMatches.length;
+          renderResults(searchInput.value.trim());
+        }
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        pickActive();
+      } else if (e.key === 'Escape') {
+        searchInput.value = '';
+        runSearch('');
+        searchInput.blur();
+      }
+    });
+    searchClear.addEventListener('click', () => {
+      searchInput.value = '';
+      runSearch('');
+      searchInput.focus();
+    });
+    document.addEventListener('click', e => {
+      if (!searchEl.contains(e.target)) searchEl.classList.remove('open');
+    });
+    // Cmd/Ctrl-K to focus the search box.
+    document.addEventListener('keydown', e => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInput.focus();
+        searchInput.select();
+      }
+    });
   </script>
 </body>
 </html>
