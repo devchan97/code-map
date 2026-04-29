@@ -18,8 +18,15 @@ type Target struct {
 	Version    string // version string substituted into the template
 }
 
-// errCodexPending is the sentinel used when a codex target is requested.
-var errCodexPending = errors.New("codex skill spec pending; verify at release time")
+// ErrCodexPending is returned when a codex target is requested while the
+// upstream Codex skill spec is still being finalised. Exported so the CLI
+// layer can detect the case via errors.Is and replace the long wrap chain
+// with a single user-readable message.
+var ErrCodexPending = errors.New("codex skill spec pending; verify at release time")
+
+// errCodexPending keeps the previous unexported alias for tests in this
+// package; new code should use ErrCodexPending.
+var errCodexPending = ErrCodexPending
 
 // ResolvePath returns the absolute file path for the SKILL.md of the given target.
 // Output paths are normalized to forward slashes.
