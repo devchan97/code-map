@@ -71,8 +71,8 @@ on an already-initialised repository.`,
 
 			// Update registry mirror with results.
 			entry.LastIndexed = sum.IndexedAt
-			entry.FileCount = sum.Parsed + sum.Skipped
-			entry.SymbolCount = sum.Symbols
+			entry.FileCount = sum.TotalFiles
+			entry.SymbolCount = sum.TotalSymbols
 			if err := reg.Upsert(entry); err != nil {
 				return fmt.Errorf("init: update registry: %w", err)
 			}
