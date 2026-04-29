@@ -19,11 +19,14 @@
 #   CC="zig cc -target <zig-triple>"  GOOS=... GOARCH=... CGO_ENABLED=1 go build
 #
 # Zig triples used:
-#   darwin/amd64   → x86_64-macos
-#   darwin/arm64   → aarch64-macos
 #   linux/amd64    → x86_64-linux-musl   (musl → fully static binary)
 #   linux/arm64    → aarch64-linux-musl  (musl → fully static binary)
 #   windows/amd64  → x86_64-windows-gnu
+#
+# darwin (macOS) targets are intentionally disabled — the GitHub-hosted
+# ubuntu-latest runner cancels mid-build on the macos cross-compile step.
+# Re-enable once we have a working macos build path (either a macos runner
+# or a stable zig+SDK combination on linux).
 #
 # Linux static linking note:
 #   musl target produces a fully static binary. Verify after build with:
@@ -80,7 +83,6 @@ builds:
       - -X github.com/devchan97/code-map/internal/cli.Version={{.Version}}
       - -X github.com/devchan97/code-map/internal/cli.GitSHA={{.FullCommit}}
     goos:
-      - darwin
       - linux
       - windows
     goarch:
@@ -107,22 +109,6 @@ builds:
     # absolute path is stable and PATH-resolvable. For local snapshot builds,
     # see Makefile (release-snapshot target also installs them).
     overrides:
-      # ── darwin/amd64 ──────────────────────────────────────────────────────
-      - goos: darwin
-        goarch: amd64
-        env:
-          - CGO_ENABLED=1
-          - CC=/usr/local/bin/zigcc-darwin-amd64
-          - CXX=/usr/local/bin/zigcxx-darwin-amd64
-
-      # ── darwin/arm64 (Apple Silicon) ──────────────────────────────────────
-      - goos: darwin
-        goarch: arm64
-        env:
-          - CGO_ENABLED=1
-          - CC=/usr/local/bin/zigcc-darwin-arm64
-          - CXX=/usr/local/bin/zigcxx-darwin-arm64
-
       # ── linux/amd64 (musl static) ─────────────────────────────────────────
       - goos: linux
         goarch: amd64
@@ -197,32 +183,7 @@ release:
   # Marks pre-release automatically when Version contains "-rc", "-beta", etc.
   name_template: "codemap {{.Version}}"
 
-# ─── Homebrew tap ────────────────────────────────────────────────────────────
-# Prerequisite: create the devchan97/homebrew-tap repository on GitHub and
-# add a HOMEBREW_TAP_TOKEN secret (GitHub PAT with repo write access) to the
-# code-map repo's Actions secrets.
-#
-# Once the tap repo exists, users can install with:
-#   brew install devchan97/tap/codemap
-brews:
-  - name: codemap
-    repository:
-      owner: devchan97
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
-    homepage: "https://github.com/devchan97/code-map"
-    description: "Local code-retrieval CLI for coding agents (Claude Code, Codex)"
-    license: "MIT"
-    # Only include macOS bottles (darwin builds) in the Homebrew formula.
-    # Linux users install via `brew install` on Linuxbrew or directly via curl.
-    ids:
-      - codemap
-    install: |
-      bin.install "codemap"
-    test: |
-      system "#{bin}/codemap", "version"
-    commit_author:
-      name: goreleaser-bot
-      email: bot@goreleaser.com
-    commit_msg_template: "chore: bump codemap to {{.Version}}"
+# ─── Homebrew tap (disabled) ─────────────────────────────────────────────────
+# Disabled while darwin builds are off. Re-enable together with the darwin
+# entries in `builds.goos` once the macOS build path is stable, then create
+# devchan97/homebrew-tap and add the HOMEBREW_TAP_TOKEN secret.

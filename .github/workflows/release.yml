@@ -52,13 +52,9 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/*.sh
-          sudo install -m 0755 scripts/zigcc-darwin-amd64.sh    /usr/local/bin/zigcc-darwin-amd64
-          sudo install -m 0755 scripts/zigcc-darwin-arm64.sh    /usr/local/bin/zigcc-darwin-arm64
           sudo install -m 0755 scripts/zigcc-linux-amd64.sh     /usr/local/bin/zigcc-linux-amd64
           sudo install -m 0755 scripts/zigcc-linux-arm64.sh     /usr/local/bin/zigcc-linux-arm64
           sudo install -m 0755 scripts/zigcc-windows-amd64.sh   /usr/local/bin/zigcc-windows-amd64
-          sudo install -m 0755 scripts/zigcxx-darwin-amd64.sh   /usr/local/bin/zigcxx-darwin-amd64
-          sudo install -m 0755 scripts/zigcxx-darwin-arm64.sh   /usr/local/bin/zigcxx-darwin-arm64
           sudo install -m 0755 scripts/zigcxx-linux-amd64.sh    /usr/local/bin/zigcxx-linux-amd64
           sudo install -m 0755 scripts/zigcxx-linux-arm64.sh    /usr/local/bin/zigcxx-linux-arm64
           sudo install -m 0755 scripts/zigcxx-windows-amd64.sh  /usr/local/bin/zigcxx-windows-amd64
@@ -73,13 +69,8 @@ jobs:
           args: check
 
       # ── 5. Run GoReleaser (build + publish) ──────────────────────────────
-      # GITHUB_TOKEN   — built-in; grants release write permission.
-      # HOMEBREW_TAP_TOKEN — PAT with `repo` scope on devchan97/homebrew-tap.
-      #                      Add this in: Settings → Secrets → Actions.
-      #                      If the tap repo does not yet exist, goreleaser will
-      #                      fail at the brew push step. Remove the `brews:` block
-      #                      from .goreleaser.yml (or set skip: true) until the
-      #                      homebrew-tap repo is created.
+      # GITHUB_TOKEN — built-in; grants release write permission.
+      #
       # --parallelism 1 forces goreleaser to build one target at a time. zig
       # 0.13's compile-id cache directory is not safe under concurrent
       # invocation even with per-target ZIG_LOCAL_CACHE_DIR — multiple .c
@@ -94,7 +85,3 @@ jobs:
           args: release --clean --parallelism 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Set a dummy value so goreleaser templating doesn't fail when the
-          # secret is absent (e.g. forks). The brew push will still fail if
-          # the repo doesn't exist — that's expected until the tap is created.
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || '' }}
