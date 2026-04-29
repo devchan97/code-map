@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -43,6 +44,15 @@ target agent. Use --scope project to place it inside the current repo.`,
 
 			result, err := skill.Install(t, printOnly)
 			if err != nil {
+				// codex spec is still upstream-pending; turn the long
+				// wrap chain (`install-skill: skill: install: skill:
+				// resolve path: ...`) into a single user-readable line.
+				if errors.Is(err, skill.ErrCodexPending) {
+					return fmt.Errorf(
+						"agent %q is not yet supported (codex skill spec is still being finalised upstream).\n"+
+							"Use --print to dump the SKILL.md body and place it manually, or use --agent claude-code",
+						agent)
+				}
 				return fmt.Errorf("install-skill: %w", err)
 			}
 
