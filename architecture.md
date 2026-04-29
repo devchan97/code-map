@@ -95,6 +95,7 @@ codemap/
 │   │   ├── calls.go
 │   │   ├── visualize.go
 │   │   ├── skill.go             # install-skill / uninstall-skill
+│   │   ├── install_self.go      # install-self / uninstall-self
 │   │   ├── version.go
 │   │   ├── flags.go             # shared flags (--json, --repo, --top …)
 │   │   └── output.go            # text / json formatters
@@ -166,8 +167,13 @@ codemap/
 │   │
 │   ├── skill/                   # SKILL.md install / uninstall
 │   │   ├── install.go
-│   │   ├── paths.go             # per-agent path rules
+│   │   ├── paths.go             # per-agent path rules; ErrCodexPending sentinel
 │   │   └── template.go          # SKILL.md.tmpl embed
+│   │
+│   ├── install/                 # `codemap install-self` / `uninstall-self`
+│   │   ├── install.go           # copy binary to ~/.codemap/bin, ensure PATH
+│   │   ├── path_windows.go      # HKCU\Environment + WM_SETTINGCHANGE
+│   │   └── path_unix.go         # marker block in ~/.bashrc / ~/.zshrc / …
 │   │
 │   └── platform/                # OS abstraction
 │       ├── paths.go             # ~/.codemap, %USERPROFILE% handling
@@ -177,16 +183,19 @@ codemap/
 ├── skill/
 │   └── SKILL.md.tmpl            # //go:embed source of truth
 │
-├── docs/
-│   ├── design.md                # mirror of codemap-design.md
-│   └── architecture.md          # this document
+├── scripts/                     # zig-cc wrappers, one per release target
 │
-├── .github/workflows/
-│   ├── ci.yml                   # test + lint + build matrix
-│   └── release.yml              # GoReleaser + zig-cc cross
+├── codemap-design.md            # design doc
+├── architecture.md              # this document
+│
+├── .github/
+│   ├── assets/                  # README hero GIF and other media
+│   └── workflows/
+│       ├── ci.yml               # test + lint + build matrix
+│       └── release.yml          # GoReleaser + zig-cc cross
 │
 ├── go.mod / go.sum
-└── README.md
+└── README.md / README-ko.md
 ```
 
 ### 2.1 Dependency Rules (enforced)
@@ -273,7 +282,8 @@ wrapping.
   }
 
   type Meta struct {
-      SchemaVer    int
+      SchemaVer    int        // SQLite layout version; mismatch = hard error
+      IndexerVer   int        // parser/tokenizer/resolver semantics; mismatch = soft (status stale=true)
       RepoRoot     string
       IndexedAt    time.Time
       Embedder     string     // "lexical" | "bge-small" | …
