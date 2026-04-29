@@ -246,6 +246,80 @@ func TestStore_ResolveEdges(t *testing.T) {
 	}
 }
 
+// TestStore_ResolveEdges_ShortRange covers §15 Q3: an edge whose
+// to_qualname is a bare callee name (e.g. `_cleanup` from a Python
+// parser that didn't track the same-module prefix) should be rewritten
+// to `<module>._cleanup` and marked resolved when that qualname exists
+// in the symbols table.
+//
+// External calls like `argparse.ArgumentParser` (which already contain
+// a dot) must NOT be rewritten — the short-range pass only fires on
+// dotless to_qualnames so dotted external chains stay unresolved.
+func TestStore_ResolveEdges_ShortRange(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	err := st.WithTx(ctx, func(tx Tx) error {
+		if err := tx.UpsertFile(core.File{Path: "main.py", SHA1: "h", IndexedAt: now, Language: "python", SizeBytes: 1}); err != nil {
+			return err
+		}
+		if _, err := tx.InsertSymbols([]core.Symbol{
+			{Name: "main", Qualname: "main.main", Kind: core.SymbolFunction, Scope: core.ScopeGlobal, File: "main.py", LineStart: 1, LineEnd: 5},
+			{Name: "_cleanup", Qualname: "main._cleanup", Kind: core.SymbolFunction, Scope: core.ScopeGlobal, File: "main.py", LineStart: 10, LineEnd: 12},
+		}); err != nil {
+			return err
+		}
+		return tx.InsertEdges([]core.Edge{
+			// bare same-module call — should resolve to main._cleanup
+			{FromQualname: "main.main", ToQualname: "_cleanup", Kind: core.EdgeCall, Resolved: false},
+			// dotted external — must stay unresolved
+			{FromQualname: "main.main", ToQualname: "argparse.ArgumentParser", Kind: core.EdgeCall, Resolved: false},
+			// already-resolved exact match — unchanged
+			{FromQualname: "main.main", ToQualname: "main._cleanup", Kind: core.EdgeReference, Resolved: false},
+		}, "main.py")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.WithTx(ctx, func(tx Tx) error { return tx.ResolveEdges() }); err != nil {
+		t.Fatal(err)
+	}
+
+	err = st.WithTx(ctx, func(tx Tx) error {
+		edges, err := tx.EdgesFrom("main.main")
+		if err != nil {
+			return err
+		}
+		var resolvedCleanup, resolvedRef bool
+		var argparseStillUnresolved bool
+		for _, e := range edges {
+			switch {
+			case e.ToQualname == "main._cleanup" && e.Resolved && e.Kind == core.EdgeCall:
+				resolvedCleanup = true
+			case e.ToQualname == "main._cleanup" && e.Resolved && e.Kind == core.EdgeReference:
+				resolvedRef = true
+			case e.ToQualname == "argparse.ArgumentParser" && !e.Resolved:
+				argparseStillUnresolved = true
+			}
+		}
+		if !resolvedCleanup {
+			t.Errorf("bare-name edge to `_cleanup` was not rewritten to `main._cleanup`/resolved")
+		}
+		if !resolvedRef {
+			t.Errorf("exact-match edge to `main._cleanup` was not resolved")
+		}
+		if !argparseStillUnresolved {
+			t.Errorf("dotted external `argparse.ArgumentParser` should stay unresolved")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStore_SearchBM25_Basic(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

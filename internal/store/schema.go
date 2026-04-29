@@ -16,7 +16,14 @@ const SchemaVer = 1
 // across a skew, but search results will be stale; the mismatch is
 // surfaced via `codemap status` (Stale=true) rather than failing
 // Open(), so existing scripts keep working until the user reindexes.
-const IndexerVer = 1
+//
+// History:
+//   - 1: initial value introduced alongside indexer_ver tracking.
+//   - 2: short-range edge resolver — bare-name to_qualnames are
+//     rewritten to `<from-module>.<name>` when the prefixed form is a
+//     known symbol. Existing indexes have raw bare names in their
+//     edges table; reindex to refresh.
+const IndexerVer = 2
 
 // schemaSQL is the DDL applied to a fresh database.
 // Statements are separated by semicolons and applied via a single db.Exec call.

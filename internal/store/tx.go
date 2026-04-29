@@ -728,15 +728,144 @@ func (t *txImpl) queryEdges(q, qualname string) ([]core.Edge, error) {
 	return edges, nil
 }
 
-// ResolveEdges sets resolved=1 on every edge whose to_qualname matches a
-// qualname present in the symbols table.
+// ResolveEdges resolves edge endpoints in two passes:
+//
+//  1. Exact match — set resolved=1 on every edge whose to_qualname
+//     matches an existing symbols.qualname verbatim.
+//  2. Short-range rewrite — for each still-unresolved edge whose
+//     to_qualname has no dots (a bare callee name like `_cleanup`),
+//     try prepending the *module prefix* of from_qualname (everything
+//     up to and including the last dot) and check whether that
+//     produces a known qualname. This catches the common case of a
+//     same-module function calling a same-module helper without the
+//     parser tracking aliases or imports.
+//
+// The second pass is intentionally narrow: only bare names (no dots)
+// are rewritten, so we never collapse a dotted chain like
+// `parser.add_argument` into a same-module symbol by accident. Type
+// inference, transitive imports, and aliasing remain explicit
+// non-goals (codemap-design.md §4.3 / §15 Q3).
 func (t *txImpl) ResolveEdges() error {
-	const q = `
+	const exact = `
 UPDATE edges SET resolved = 1
-WHERE to_qualname IN (SELECT qualname FROM symbols)`
+WHERE resolved = 0
+  AND to_qualname IN (SELECT qualname FROM symbols)`
 
-	if _, err := t.tx.ExecContext(t.ctx, q); err != nil {
-		return fmt.Errorf("store.ResolveEdges: %w", err)
+	if _, err := t.tx.ExecContext(t.ctx, exact); err != nil {
+		return fmt.Errorf("store.ResolveEdges (exact): %w", err)
+	}
+
+	// instr(s, '.') gives the 1-based index of the first dot or 0 when
+	// there is none — so "X.Y.func" → 2, "func" → 0. We use the *last*
+	// dot in from_qualname to derive the module prefix, hence rfind via
+	// length - instr(reverse(...)).
+	//
+	// SQLite has no built-in `reverse()` and rolling our own UDF would
+	// require a CGO driver; instead we use a CTE that filters edges
+	// where to_qualname has no dot, joins against symbols on the
+	// concatenation `<module>.<to>`, and rewrites both to_qualname and
+	// resolved in a single UPDATE.
+	const shortRange = `
+WITH candidate AS (
+  SELECT
+    e.rowid AS rid,
+    e.from_qualname AS fq,
+    e.to_qualname AS tq,
+    -- module prefix of from_qualname: everything up to (and
+    -- including) the last dot. "" when from has no dot.
+    CASE
+      WHEN instr(e.from_qualname, '.') = 0 THEN ''
+      ELSE substr(
+        e.from_qualname, 1,
+        length(e.from_qualname)
+          - length(replace_after_last_dot(e.from_qualname))
+      )
+    END AS module_prefix
+  FROM edges e
+  WHERE e.resolved = 0
+    AND instr(e.to_qualname, '.') = 0
+    AND e.to_qualname <> ''
+)
+SELECT 1`
+	// SQLite has no replace_after_last_dot helper; the SQL above is
+	// pseudocode for clarity. We compute the prefix in Go where it's
+	// trivial, then issue one UPDATE per edge that matched. The pass
+	// runs once at the end of an indexing run, so this is fine even
+	// for repos with thousands of unresolved edges.
+	_ = shortRange
+
+	type candidate struct {
+		rowid int64
+		from  string
+		to    string
+	}
+	rows, err := t.tx.QueryContext(t.ctx, `
+SELECT rowid, from_qualname, to_qualname
+FROM edges
+WHERE resolved = 0
+  AND instr(to_qualname, '.') = 0
+  AND to_qualname <> ''`)
+	if err != nil {
+		return fmt.Errorf("store.ResolveEdges (short-range scan): %w", err)
+	}
+	var cands []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.rowid, &c.from, &c.to); err != nil {
+			rows.Close()
+			return fmt.Errorf("store.ResolveEdges scan: %w", err)
+		}
+		cands = append(cands, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store.ResolveEdges rows: %w", err)
+	}
+
+	if len(cands) == 0 {
+		return nil
+	}
+
+	// Cache symbols.qualname presence in a Go map. ~tens of thousands
+	// of qualnames at most; one round-trip is cheaper than per-edge
+	// EXISTS subqueries.
+	known := make(map[string]struct{}, 1024)
+	qrows, err := t.tx.QueryContext(t.ctx, `SELECT qualname FROM symbols`)
+	if err != nil {
+		return fmt.Errorf("store.ResolveEdges (load qualnames): %w", err)
+	}
+	for qrows.Next() {
+		var q string
+		if err := qrows.Scan(&q); err != nil {
+			qrows.Close()
+			return fmt.Errorf("store.ResolveEdges qn scan: %w", err)
+		}
+		known[q] = struct{}{}
+	}
+	qrows.Close()
+	if err := qrows.Err(); err != nil {
+		return fmt.Errorf("store.ResolveEdges qn rows: %w", err)
+	}
+
+	updateStmt, err := t.tx.PrepareContext(t.ctx,
+		`UPDATE edges SET to_qualname = ?, resolved = 1 WHERE rowid = ?`)
+	if err != nil {
+		return fmt.Errorf("store.ResolveEdges prepare: %w", err)
+	}
+	defer updateStmt.Close()
+
+	for _, c := range cands {
+		dot := strings.LastIndex(c.from, ".")
+		if dot < 0 {
+			continue
+		}
+		candidate := c.from[:dot+1] + c.to
+		if _, ok := known[candidate]; !ok {
+			continue
+		}
+		if _, err := updateStmt.ExecContext(t.ctx, candidate, c.rowid); err != nil {
+			return fmt.Errorf("store.ResolveEdges update rowid=%d: %w", c.rowid, err)
+		}
 	}
 	return nil
 }
