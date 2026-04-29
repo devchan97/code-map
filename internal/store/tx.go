@@ -281,6 +281,60 @@ func (t *txImpl) SearchBM25(ctx context.Context, query string, topN int, f lexic
 		}
 	}
 
+	// Issue #2: token IN (...) is exact-match only, so a query for "parse"
+	// misses every "parser"/"parsed" symbol. Expand each query term of
+	// length >= prefixExpandMin with stored tokens that begin with it.
+	// SQLite uses the index on tokens(token) for `LIKE 'parse%'` because
+	// the column is text and the pattern has no leading wildcard.
+	//
+	// We cap the expansion per term so that a one-letter prefix can't
+	// pull in tens of thousands of tokens; that case stays exact-match.
+	const (
+		prefixExpandMin    = 3
+		prefixExpandPerTok = 64
+	)
+	if len(terms) > 0 {
+		expandedSet := make(map[string]struct{}, len(terms))
+		for _, qt := range terms {
+			expandedSet[qt] = struct{}{}
+		}
+		for _, qt := range terms {
+			if len([]rune(qt)) < prefixExpandMin {
+				continue
+			}
+			rows, err := t.tx.QueryContext(ctx,
+				"SELECT DISTINCT token FROM tokens WHERE token LIKE ? ESCAPE '\\' LIMIT ?",
+				escapeLike(qt)+"%", prefixExpandPerTok+1)
+			if err != nil {
+				return nil, fmt.Errorf("store.SearchBM25 expand %q: %w", qt, err)
+			}
+			count := 0
+			overflow := false
+			for rows.Next() {
+				var tok string
+				if err := rows.Scan(&tok); err != nil {
+					rows.Close()
+					return nil, fmt.Errorf("store.SearchBM25 expand scan: %w", err)
+				}
+				count++
+				if count > prefixExpandPerTok {
+					// Too many matches — skip expansion for this term;
+					// the original exact term stays in expandedSet.
+					overflow = true
+					break
+				}
+				expandedSet[tok] = struct{}{}
+			}
+			rows.Close()
+			_ = overflow
+		}
+		expanded := make([]string, 0, len(expandedSet))
+		for tok := range expandedSet {
+			expanded = append(expanded, tok)
+		}
+		terms = expanded
+	}
+
 	// Fetch corpus stats needed for BM25.
 	n, avgLen, err := t.Stats(ctx)
 	if err != nil {
@@ -897,6 +951,25 @@ func globToLike(glob string) string {
 			sb.WriteByte(c)
 		}
 		i++
+	}
+	return sb.String()
+}
+
+// escapeLike escapes the LIKE wildcards (`%`, `_`) and the escape char `\`
+// itself so a user-provided string can be safely used as the literal portion
+// of a `WHERE col LIKE 'literal%' ESCAPE '\'` query.
+func escapeLike(s string) string {
+	if !strings.ContainsAny(s, `%_\`) {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s) + 4)
+	for _, r := range s {
+		switch r {
+		case '%', '_', '\\':
+			sb.WriteByte('\\')
+		}
+		sb.WriteRune(r)
 	}
 	return sb.String()
 }

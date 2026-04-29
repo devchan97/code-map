@@ -48,6 +48,14 @@ type Summary struct {
 	Symbols int
 	// Edges is the total number of edges inserted in this run.
 	Edges int
+	// TotalSymbols is the cumulative symbol count in the index after this run
+	// (matches the value written to meta.symbol_count). Use this — not
+	// Symbols — when mirroring counts into the registry so that `status`
+	// (reads SQLite meta) and `list` (reads registry) agree.
+	TotalSymbols int
+	// TotalFiles is the cumulative file count in the index after this run
+	// (matches meta.file_count). Same rationale as TotalSymbols.
+	TotalFiles int
 	// Duration is the wall-clock time for the full indexing pass.
 	Duration time.Duration
 	// IndexedAt is the UTC timestamp written to the meta table.
@@ -102,6 +110,7 @@ func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOpti
 	// --- 4. Fast path: nothing to do. ---
 	if len(changed) == 0 && len(removed) == 0 && !opts.Force {
 		now := time.Now().UTC()
+		var fastSymbols, fastFiles int
 		// Still write updated indexed_at.
 		if err := st.WithTx(ctx, func(tx store.Tx) error {
 			meta, err := tx.ReadMeta()
@@ -109,14 +118,18 @@ func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOpti
 				return err
 			}
 			meta.IndexedAt = now
+			fastSymbols = meta.SymbolCount
+			fastFiles = meta.FileCount
 			return tx.WriteMeta(meta)
 		}); err != nil {
 			return Summary{}, fmt.Errorf("pipeline.Index: update meta (no-op): %w", err)
 		}
 		return Summary{
-			Skipped:   len(prev),
-			Duration:  time.Since(start),
-			IndexedAt: now,
+			Skipped:      len(prev),
+			TotalSymbols: fastSymbols,
+			TotalFiles:   fastFiles,
+			Duration:     time.Since(start),
+			IndexedAt:    now,
 		}, nil
 	}
 
@@ -188,6 +201,7 @@ func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOpti
 	// --- 8. Single transaction: delete removed, upsert changed. ---
 	now := time.Now().UTC()
 	var totalSymbols, totalEdges, parsedCount, skippedCount int
+	var totalSymbolsAfter, totalFilesAfter int
 
 	if err := st.WithTx(ctx, func(tx store.Tx) error {
 		// 8a. Delete removed files.
@@ -295,19 +309,23 @@ func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOpti
 			SymbolCount: n,
 			FileCount:   len(files),
 		}
+		totalSymbolsAfter = n
+		totalFilesAfter = len(files)
 		return tx.WriteMeta(meta)
 	}); err != nil {
 		return Summary{}, fmt.Errorf("pipeline.Index: transaction: %w", err)
 	}
 
 	return Summary{
-		Parsed:    parsedCount,
-		Skipped:   skippedCount,
-		Removed:   len(removed),
-		Symbols:   totalSymbols,
-		Edges:     totalEdges,
-		Duration:  time.Since(start),
-		IndexedAt: now,
+		Parsed:       parsedCount,
+		Skipped:      skippedCount,
+		Removed:      len(removed),
+		Symbols:      totalSymbols,
+		Edges:        totalEdges,
+		TotalSymbols: totalSymbolsAfter,
+		TotalFiles:   totalFilesAfter,
+		Duration:     time.Since(start),
+		IndexedAt:    now,
 	}, nil
 }
 
