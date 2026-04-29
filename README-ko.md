@@ -79,6 +79,38 @@ codemap 은 무엇인가, 그리고 무엇이 아닌가에 대해 의견이 분�
 - **로컬, 단일 사용자, 텔레메트리 없음.** 서버도, 공유 캐시도, 어떤 기본
   코드 경로에서도 머신을 떠나는 데이터가 없습니다.
 
+### codemap 이 빛날 때, partial-Read 면 충분할 때
+
+위 항목들은 codemap 이 무엇을 최적화하는지에 대한 입장이지, 모든
+워크로드에서 whole-file read 를 이긴다는 주장이 아닙니다. 어디서
+어떤 도구가 유리한지 측정한 결과:
+
+- **작은 레포에서 단발 좁은 질문** (예: "WS 핸드셰이크 매직값 어디?").
+  `Grep` + whole-file `Read` 한 번이 `search` + `show --full` 과
+  거의 동일한 토큰 예산으로 답합니다. codemap 이 답을 짧게 만들지는
+  않습니다 — 어떤 호출로 답하는지를 바꿀 뿐입니다.
+- **크로스-모듈 구조 질문** ("누가 `MGR` 을 import 하나?",
+  "`routes.handle` 이 실제로 무엇을 호출하나?"). codemap 의 `refs` /
+  `calls` 는 **양 끝이 인덱스에 존재함을 보증하는 resolved=true 엣지**
+  를 돌려줍니다. `Grep` 의 텍스트 매칭으로 근사할 수 있지만, 레포
+  크기와 간접 호출이 늘수록 false positive 가 빠르게 늘어납니다.
+- **긴 세션에서의 반복 호출.** 인덱싱은 한 번만 갚으면 되고, 이후
+  모든 호출은 50 ms cold-start 예산 안에서 새 프로세스로 끝납니다.
+  세션이 길어지고 질문 횟수가 많아질수록 codemap 의 amortized
+  비용이 파일 재read 보다 유리해집니다.
+- **본문 깊이 질문** (정확한 `if` 조건, 500-라인 함수 전체).
+  기본 10 줄 스니펫은 너무 짧습니다. `show --lines N` / `--full`
+  로 창을 넓히고, 모든 `show` 출력에 `hint:     full body via
+  Read <file> offset=… limit=…` 한 줄이 자동으로 붙어서 한 번의
+  partial Read 로 떨어질 수 있습니다. 본문 전체를 매 응답에
+  싣자는 게 아니라, partial Read 를 정확히 싸게 하자는 겁니다.
+
+요약: codemap 의 강점은 **엣지 resolution 정확도** 와 **여러 호출에
+걸친 amortized 비용** 이지, 작은 레포에서의 단발 토큰 절감이
+아닙니다. "X 가 어디 있나?" / "누가 Y 를 부르나?" / "여러 턴에 걸쳐
+이 코드베이스를 탐색" 에는 codemap 을, 한 번의 whole-file read 로
+질문이 닫히는 경우엔 `Grep` + `Read` 를 쓰세요.
+
 ## 진행 상태
 
 Python + 6 개 언어 파서 (Java, JavaScript, TypeScript, TSX, C#, C++),

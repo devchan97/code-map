@@ -38,6 +38,37 @@ Implications that shape every decision below:
   identifier-shaped queries and structural filters; the agent translates
   user prose (in any language) into those queries.
 
+### 1.1 Where codemap actually wins (and where it doesn't)
+
+Section 1's framing — "agent reads 36 lines instead of 1,800" — is the
+best case, not the average case. A measurement-grounded view of where
+codemap pulls ahead of `Grep` + whole-file `Read`:
+
+| Workload | Winner | Why |
+|---|---|---|
+| Single narrow lookup on a ≤2k-LOC repo | tie / Grep+Read | Both finish in roughly the same token budget; codemap doesn't shrink the answer, it changes which calls produce it. |
+| Cross-module structural ("who imports X?", "what does Y call?") | codemap | `refs` / `calls` return **resolved=true** edges with both endpoints named. Text-matching approximations grow false positives with repo size and indirection. |
+| Repeated lookups across a long session | codemap | Indexing is amortized once; subsequent calls fit in the 50 ms cold-start budget. The more turns, the better the ratio. |
+| Whole-function or whole-file body | Grep+Read or `show --full` | Default 10-line snippet is too small. `show --lines N` / `--full` plus the auto-appended `hint: full body via Read <file> offset=… limit=…` line make partial-Read the cheapest closing move; the snippet itself is not where to put the body. |
+| Whole-codebase architecture write-up | Grep+Read | Every line matters; whole-file reads dominate and codemap's per-symbol granularity becomes overhead. |
+
+Two practical claims that survive the measurement:
+
+1. **Edge-resolution accuracy** is codemap's structural moat. Anything
+   that requires "and resolved at both ends" — call graphs, import
+   graphs, refs across modules — is what justifies the parser
+   pipeline, not raw lookup speed.
+2. **Amortized cost across N calls**, not single-call token savings,
+   is the value proposition that aligns with the agent-on-every-turn
+   model. The README's "agent calls codemap on every relevant turn"
+   is a claim about steady-state cost, not first-call cost.
+
+Both of these flow back into design choices below: keep edges
+trustworthy (resolved flag, language-specific parsers), keep the
+binary cold-start cheap (no daemon, SQLite mmap, BM25 in-process), and
+make partial-Read fall-through explicit (the `hint:` line on every
+`show`).
+
 ---
 
 ## 2. Requirements (recap)

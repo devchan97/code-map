@@ -81,6 +81,39 @@ for another, so the boundaries are stated up front.
 - **Local, single-user, no telemetry.** No server, no shared cache, no
   data leaving the machine in any default code path.
 
+### When codemap helps, when partial-Read is enough
+
+The bullets above describe what codemap optimizes for. They are not a
+claim that codemap beats whole-file reads on every workload. A measured
+look at where each one wins:
+
+- **Single, narrow question on a small repo** (e.g. "where is the WS
+  handshake magic?"). A `Grep` + one whole-file `Read` answers it in
+  roughly the same token budget as `search` + `show --full`. codemap
+  doesn't shrink the answer; it just changes which calls produce it.
+- **Cross-module structural questions** ("who imports `MGR`?", "what
+  does `routes.handle` actually call?"). codemap's `refs` and `calls`
+  return **resolved=true** edges that name both endpoints — `Grep` can
+  approximate this with text matching, but the false-positive rate
+  rises with repo size and indirection.
+- **Repeated calls across a long session.** Indexing is amortized once;
+  every subsequent lookup is a fresh process under the 50 ms cold-start
+  budget. The longer the session and the more often you ask, the
+  cheaper codemap looks relative to re-reading files.
+- **Body-deep questions** (the exact `if` condition, the full body of
+  a 500-line function). The default 10-line snippet is too small;
+  `show --lines N` / `--full` widen the window, and every `show`
+  prints a `hint:     full body via Read <file> offset=… limit=…`
+  line so the caller can fall through to a partial read in one
+  round-trip. The point is to make the partial-read cheap and
+  precise, not to put the whole body on every response.
+
+The short version: codemap's edge is **edge-resolution accuracy** and
+**amortized cost across many calls**, not single-call token savings on
+small repos. Use it for "where does X live?" / "who calls Y?" /
+"navigate this codebase across many turns"; reach for `Grep` + `Read`
+when one whole-file read closes the question.
+
 ## Status
 
 Python + six additional language parsers (Java, JavaScript, TypeScript,
