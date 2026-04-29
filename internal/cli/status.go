@@ -22,7 +22,13 @@ type statusOutput struct {
 	SymbolCount int       `json:"symbol_count"`
 	Embedder    string    `json:"embedder"`
 	SchemaVer   int       `json:"schema_ver"`
-	Stale       bool      `json:"stale"`
+	IndexerVer  int       `json:"indexer_ver"`
+	// Stale is true when the index data was produced by a different
+	// IndexerVer than the running binary. The DB still reads, but
+	// search results may not reflect the current parser/tokenizer
+	// rules; user should run `codemap reindex`.
+	Stale       bool   `json:"stale"`
+	StaleReason string `json:"stale_reason,omitempty"`
 }
 
 // readMeta reads the meta table from st inside a short read-only transaction.
@@ -72,6 +78,28 @@ func newStatusCmd() *cobra.Command {
 				return fmt.Errorf("status: %w", err)
 			}
 
+			// Surface indexer_ver skew as a stale flag rather than a
+			// hard error: the data is still readable, just produced by
+			// an older parser/tokenizer that may emit different
+			// qualnames or tokens than the running binary.
+			stale := false
+			reason := ""
+			if meta.IndexerVer != 0 && meta.IndexerVer != store.IndexerVer {
+				stale = true
+				reason = fmt.Sprintf(
+					"indexer_ver %d on disk, %d in this binary — run `codemap reindex` to refresh",
+					meta.IndexerVer, store.IndexerVer,
+				)
+			} else if meta.IndexerVer == 0 {
+				// Pre-IndexerVer index. Treat as stale once the binary
+				// understands the field; user reindex is cheap.
+				stale = true
+				reason = fmt.Sprintf(
+					"index predates indexer_ver tracking — run `codemap reindex` to upgrade to indexer_ver %d",
+					store.IndexerVer,
+				)
+			}
+
 			out := statusOutput{
 				Name:        entry.Name,
 				Path:        entry.Path,
@@ -80,7 +108,9 @@ func newStatusCmd() *cobra.Command {
 				SymbolCount: meta.SymbolCount,
 				Embedder:    meta.Embedder,
 				SchemaVer:   meta.SchemaVer,
-				Stale:       false, // v1: always false
+				IndexerVer:  meta.IndexerVer,
+				Stale:       stale,
+				StaleReason: reason,
 			}
 
 			if jsonOut {
@@ -96,7 +126,11 @@ func newStatusCmd() *cobra.Command {
 			fmt.Printf("symbol_count: %d\n", out.SymbolCount)
 			fmt.Printf("embedder:     %s\n", out.Embedder)
 			fmt.Printf("schema_ver:   %d\n", out.SchemaVer)
+			fmt.Printf("indexer_ver:  %d\n", out.IndexerVer)
 			fmt.Printf("stale:        %v\n", out.Stale)
+			if out.StaleReason != "" {
+				fmt.Printf("              %s\n", out.StaleReason)
+			}
 			return nil
 		},
 	}

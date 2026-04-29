@@ -2,7 +2,21 @@
 package store
 
 // SchemaVer is the current on-disk schema version.
+//
+// Bump when the SQLite layout changes — i.e. when an older binary could
+// no longer correctly read the new DB or vice versa. Mismatch is a hard
+// error caught at Open() time; the user must `codemap reindex`.
 const SchemaVer = 1
+
+// IndexerVer is the current parser/tokenizer/edge-format version.
+//
+// Bump when the *meaning* of stored data changes even though the SQLite
+// layout did not — e.g. tokenizer rule change, parser emitting qualnames
+// differently, edge resolver behaviour change. The DB is still readable
+// across a skew, but search results will be stale; the mismatch is
+// surfaced via `codemap status` (Stale=true) rather than failing
+// Open(), so existing scripts keep working until the user reindexes.
+const IndexerVer = 1
 
 // schemaSQL is the DDL applied to a fresh database.
 // Statements are separated by semicolons and applied via a single db.Exec call.
