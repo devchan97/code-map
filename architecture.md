@@ -53,13 +53,12 @@
 └──────────┬──────────────────────────────┬───────────────────────┘
            │                              │
            ▼                              ▼
-┌──────────────────────┐         ┌──────────────────────────┐
-│ ~/.codemap/          │         │ <repo>/.codemap/         │
-│   registry.toml      │         │   index.db    (SQLite)   │
-│   state.toml (opt)   │         │   meta.json   (mirror)   │
-│                      │         │   config.toml (opt)      │
-│                      │         │   graph.html  (visualize)│
-└──────────────────────┘         └──────────────────────────┘
+┌──────────────────────────────┐ ┌──────────────────────────┐
+│ ~/.codemap/                  │ │ <repo>/.codemap/         │
+│   registry.toml              │ │   index.db    (SQLite)   │
+│   state.toml          (opt)  │ │   graph.html  (visualize)│
+│   bin/codemap{,.exe}  (opt)  │ │                          │
+└──────────────────────────────┘ └──────────────────────────┘
 ```
 
 - A new process is spawned per invocation (no daemon). Therefore **all state
@@ -95,6 +94,7 @@ codemap/
 │   │   ├── calls.go
 │   │   ├── visualize.go
 │   │   ├── skill.go             # install-skill / uninstall-skill
+│   │   ├── install_self.go      # install-self / uninstall-self
 │   │   ├── version.go
 │   │   ├── flags.go             # shared flags (--json, --repo, --top …)
 │   │   └── output.go            # text / json formatters
@@ -166,8 +166,13 @@ codemap/
 │   │
 │   ├── skill/                   # SKILL.md install / uninstall
 │   │   ├── install.go
-│   │   ├── paths.go             # per-agent path rules
+│   │   ├── paths.go             # per-agent path rules; ErrCodexPending sentinel
 │   │   └── template.go          # SKILL.md.tmpl embed
+│   │
+│   ├── install/                 # `codemap install-self` / `uninstall-self`
+│   │   ├── install.go           # copy binary to ~/.codemap/bin, ensure PATH
+│   │   ├── path_windows.go      # HKCU\Environment + WM_SETTINGCHANGE
+│   │   └── path_unix.go         # marker block in ~/.bashrc / ~/.zshrc / …
 │   │
 │   └── platform/                # OS abstraction
 │       ├── paths.go             # ~/.codemap, %USERPROFILE% handling
@@ -177,22 +182,25 @@ codemap/
 ├── skill/
 │   └── SKILL.md.tmpl            # //go:embed source of truth
 │
-├── docs/
-│   ├── design.md                # mirror of codemap-design.md
-│   └── architecture.md          # this document
+├── scripts/                     # zig-cc wrappers, one per release target
 │
-├── .github/workflows/
-│   ├── ci.yml                   # test + lint + build matrix
-│   └── release.yml              # GoReleaser + zig-cc cross
+├── codemap-design.md            # design doc
+├── architecture.md              # this document
+│
+├── .github/
+│   ├── assets/                  # README hero GIF and other media
+│   └── workflows/
+│       ├── ci.yml               # test + lint + build matrix
+│       └── release.yml          # GoReleaser + zig-cc cross
 │
 ├── go.mod / go.sum
-└── README.md
+└── README.md / README-ko.md
 ```
 
 ### 2.1 Dependency Rules (enforced)
 
 ```
-cli ──► search / pipeline / graph / visualize / skill / registry
+cli ──► search / pipeline / graph / visualize / skill / install / registry
         │
         ▼
    store ◄── pipeline, search, graph, visualize
@@ -201,6 +209,7 @@ cli ──► search / pipeline / graph / visualize / skill / registry
    lexical ◄── pipeline (write), search (read)
    encoder ◄── search (optional, build tag)
    registry ◄── cli, pipeline, search
+   install ◄── cli            (codemap install-self / uninstall-self)
    core    ◄── (importable from anywhere; depends on nothing internal)
    platform ◄── almost every module
 ```
@@ -221,7 +230,7 @@ cli ──► search / pipeline / graph / visualize / skill / registry
 |---|---|---|
 | CLI | `spf13/cobra` + `spf13/pflag` | Standard. |
 | TOML | `BurntSushi/toml` | Stable. |
-| SQLite | `modernc.org/sqlite` (pure Go) **or** `mattn/go-sqlite3` (CGO) | Tree-sitter is already CGO, so `mattn` is fine; we still prefer `modernc` to keep cross-builds simple. Locked in M1. |
+| SQLite | `modernc.org/sqlite` (pure Go) | Locked in M1. tree-sitter's CGO requirement is local to `internal/parser/<lang>/`; everything else (store, cli, tests) builds CGO-free with this driver. See §14.A for the trade-off. |
 | Tree-sitter | `smacker/go-tree-sitter` (CGO) | One submodule per grammar. |
 | Gitignore | `sabhiram/go-gitignore` | Same engine handles `.codemapignore`. |
 | BM25 | hand-rolled in `lexical` | A full-stack Bleve is overkill (design §15.2). |
@@ -273,7 +282,8 @@ wrapping.
   }
 
   type Meta struct {
-      SchemaVer    int
+      SchemaVer    int        // SQLite layout version; mismatch = hard error
+      IndexerVer   int        // parser/tokenizer/resolver semantics; mismatch = soft (status stale=true)
       RepoRoot     string
       IndexedAt    time.Time
       Embedder     string     // "lexical" | "bge-small" | …
@@ -445,22 +455,26 @@ wrapping.
 - **Public surface.**
   ```go
   type IndexOptions struct {
-      Force      bool   // reindex
-      Concurrency int   // parser workers
-      Encoder    encoder.Encoder // optional
+      Force       bool             // reindex
+      Concurrency int              // parser workers; defaults to runtime.NumCPU()
+      Encoder     encoder.Encoder  // optional
+      Progress    io.Writer        // human-readable progress (defaults to os.Stderr)
   }
 
   type Summary struct {
-      ParsedFiles  int
-      SkippedFiles int
-      Symbols      int
-      Edges        int
+      Parsed       int           // files (re-)parsed in this run
+      Skipped      int           // unchanged-SHA1 or parse-error skips
+      Removed      int           // files deleted from disk and from the index
+      Symbols      int           // symbols inserted in this run
+      Edges        int           // edges inserted in this run
+      TotalSymbols int           // cumulative symbol count after this run
+      TotalFiles   int           // cumulative file count after this run
       Duration     time.Duration
       IndexedAt    time.Time
   }
 
-  func Index(ctx context.Context, repoRoot string, opts IndexOptions) (Summary, error)
-  func Reindex(ctx context.Context, repoRoot string, opts IndexOptions) (Summary, error)
+  func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOptions) (Summary, error)
+  func Reindex(ctx context.Context, st *store.Store, repoRoot string, opts IndexOptions) (Summary, error)
   ```
 - **Transaction boundary.** A single transaction per "set of changed files":
   `DELETE FROM symbols/edges/tokens WHERE file IN (...)` → INSERT new data →
@@ -508,13 +522,31 @@ wrapping.
 
 ### 3.11 `visualize`
 
-- **Responsibility.** Render `graph.html`. Single static file output. Loads
-  `vis-network` / `cytoscape.js` from a CDN at view time. Header shows
-  `lastIndexed`, repo path, node/edge counts (design §9.7).
+- **Responsibility.** Render `graph.html`. Single static file output.
+  Loads `vis-network` from a CDN at view time. The header shows
+  `lastIndexed`, repo path, and node/edge counts (design §9.7); the
+  body adds a floating search box, focus-mode edges (only the
+  selected node's edges are drawn), an aside detail panel with
+  grouped outgoing references, dark mode, and selection-history nav
+  with camera follow.
 - **Public surface.**
   ```go
-  type Options struct { OutPath string; Open bool }
-  func Render(ctx, store, opts Options) (path string, err error)
+  type Options struct {
+      OutPath  string                // defaults to <repo>/.codemap/graph.html
+      Open     bool                  // open in OS default browser when set
+      FileGlob string                // forward-slash doublestar glob
+      Kinds    []core.SymbolKind     // limit symbols by kind
+  }
+
+  // DataSource is the read-only contract visualize needs from the
+  // index. store.Tx implements it; the call site provides the adapter.
+  type DataSource interface {
+      AllSymbols(ctx context.Context, fileGlob string, kinds []core.SymbolKind) ([]core.Symbol, error)
+      AllEdges(ctx context.Context) ([]core.Edge, error)
+      ReadMeta() (core.Meta, error)
+  }
+
+  func Render(ctx context.Context, ds DataSource, repoRoot string, opts Options) (path string, err error)
   ```
 
 ### 3.12 `skill`
@@ -524,10 +556,16 @@ wrapping.
 - **Public surface.**
   ```go
   type Target struct {
-      Agent string  // "claude-code" | "codex"
-      Scope string  // "user" | "project"
-      Repo  string  // used when scope == "project"
+      Agent      string  // "claude-code" | "codex"
+      Scope      string  // "user" | "project"
+      Repo       string  // used when scope == "project"
+      BinaryName string  // substituted into SKILL body; defaults to "codemap"
+      Version    string  // substituted into SKILL body
   }
+  // ErrCodexPending is returned when Agent == "codex"; the cli layer
+  // detects it via errors.Is and prints a single user-readable line.
+  var ErrCodexPending = errors.New("codex skill spec pending; verify at release time")
+
   func Install(t Target, print bool) (path string, err error)
   func Uninstall(t Target) error
   ```
@@ -536,8 +574,38 @@ wrapping.
 
 - **Responsibility.** Register cobra commands, parse flags, call into the
   domain, format output. **No logic of its own.**
+- **Subcommand surface (v0.1.x).** init, index, reindex, list, status,
+  forget, search, show, refs, calls, visualize, install-skill,
+  uninstall-skill, install-self, uninstall-self, version. The
+  install-self / uninstall-self pair lives in `install_self.go` and
+  is the only cli handler that calls into the `internal/install`
+  package.
 - **Output formatting.** `output.go` exposes `WriteHuman` and `WriteJSON`.
   All result types are either `core.*` directly or thin CLI view-models.
+
+### 3.13a `install`
+
+- **Responsibility.** Implement `codemap install-self` / `uninstall-self`.
+  Copy the running binary to `~/.codemap/bin/codemap{,.exe}` and
+  register that directory on the user's persistent PATH. Mirror image
+  on uninstall. No admin rights anywhere.
+- **Public surface.**
+  ```go
+  type Result struct {
+      BinaryPath           string
+      BinaryCopied         bool   // a fresh copy happened this run
+      PathAdded            bool   // PATH entry created (or removed)
+      ShellRCPath          string // Unix only; rc file we touched
+      PathAlreadyEffective bool   // bin dir is on the running shell's PATH
+  }
+  func InstallSelf(selfPath string) (Result, error)
+  func UninstallSelf() (Result, error)
+  ```
+- **Platform split.** Windows writes `HKCU\Environment\Path` and
+  broadcasts `WM_SETTINGCHANGE` (`path_windows.go`). Unix appends a
+  marker block to the shell rc detected from `$SHELL`
+  (`path_unix.go`); the marker lets uninstall remove exactly the
+  inserted block.
 
 ### 3.14 `platform`
 
@@ -604,9 +672,16 @@ registry.Upsert(mirror)
 output.WriteHuman/JSON(Summary)   # files indexed/skipped, lastIndexed
 ```
 
-- **Edge resolution (`Edge.Resolved`).** First pass resolves only same-file
-  call sites. Cross-file resolution runs once after all files are parsed,
-  inside the same transaction (qualname → symbol_id lookup).
+- **Edge resolution (`Edge.Resolved`).** Runs once at the end of the
+  indexing transaction in `store.Tx.ResolveEdges()`:
+  1. Exact-match pass — `to_qualname` that equals an existing
+     `symbols.qualname` is marked `resolved=1`.
+  2. Short-range rewrite — for each still-unresolved edge whose
+     `to_qualname` has no dot, prepend the module prefix of
+     `from_qualname`; if that produces a known qualname, rewrite
+     `to_qualname` and mark `resolved=1`. Catches the common
+     same-module bare-name call (PR #11). Type-aware analysis stays
+     out of scope.
 - **Failure handling.** A parse error on one file does **not** fail the run.
   The file is isolated, logged, and *its* SHA-1 is not updated, so it gets
   retried next time. A transaction-level error rolls back the whole run.
@@ -647,21 +722,50 @@ Unresolved edges (`Resolved=false`) appear in the result set, marked.
 
 ```
 visualize.Render
-   ├─ store: fetch all symbols / edges (with optional --file or --kind filters)
+   ├─ ds.AllSymbols(fileGlob, kinds) / ds.AllEdges() / ds.ReadMeta()
+   ├─ build graphNodes (dedupe by qualname, attach locations + snippet
+   │   + outgoing edges per node)
+   ├─ for any edge whose to-endpoint is not in the node set, synthesize
+   │   an "external" placeholder node so unresolved/stdlib calls are
+   │   still visible on the canvas
    ├─ inject pre-marshaled JSON into graph.html.tmpl via embed.FS
    └─ atomic-write <repo>/.codemap/graph.html → open in browser if --open
 ```
 
-Large graphs (10k+ nodes) are deferred to design Open Question 4 — v1 just
-renders, with filters as the escape hatch.
+Large graphs (10k+ nodes) are deferred to design Open Question 4 —
+v0.1.x relies on focus-mode edges (drawn only for the selected node)
+plus the `--file` / `--kind` escape hatches.
 
-### 4.6 `codemap install-skill`
+### 4.6 `codemap install-skill` and `codemap install-self`
+
+`install-skill` writes the SKILL.md template:
 
 ```
 skill.Install({Agent, Scope, Repo}, print):
    path := skill.paths.Resolve(target)   // e.g. ~/.claude/skills/codemap/SKILL.md
    body := template.Execute(SKILL.md.tmpl, {Version, BinaryName, …})
    if print: stdout
+   else:     platform.AtomicWrite(path, body)
+
+# Codex target → ErrCodexPending → cli prints a single-line help.
+```
+
+`install-self` is the post-download PATH bootstrapper:
+
+```
+install.InstallSelf(selfPath):
+   platform.EnsureDir(~/.codemap/bin)
+   if !sameFile(selfPath, dest) && !destMatchesSrc(selfPath, dest):
+       atomic copy selfPath → ~/.codemap/bin/codemap{,.exe}
+       preserve src mtime so subsequent runs are no-ops
+   addToPath(~/.codemap/bin):
+       Windows: HKCU\Environment\Path += dir; SendMessageTimeout WM_SETTINGCHANGE
+       Unix:    append marker block to ~/.bashrc / ~/.zshrc / config.fish / ~/.profile
+   return Result{BinaryCopied, PathAdded, ShellRCPath, PathAlreadyEffective}
+```
+
+Idempotent in both directions; `uninstall-self` strips exactly the
+binary and the PATH entry the install pass created.
    else: platform.AtomicWrite(path, body)
 ```
 
@@ -676,8 +780,15 @@ CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
--- known keys: schema_ver, repo_root, indexed_at, embedder,
---             symbol_count, file_count
+-- known keys: schema_ver, indexer_ver, repo_root, indexed_at,
+--             embedder, symbol_count, file_count
+--
+-- schema_ver  : on-disk SQLite layout version. Mismatch is a hard
+--               error at Open(); the user must `codemap reindex`.
+-- indexer_ver : parser/tokenizer/edge-resolver semantics version.
+--               Mismatch is surfaced through `codemap status`
+--               (Stale=true) — DB is still readable, search just
+--               returns data shaped by an older indexer.
 
 CREATE TABLE files (
     path        TEXT PRIMARY KEY,
@@ -802,9 +913,19 @@ PRAGMA foreign_keys = ON;
   "symbol_count": 4823,
   "embedder": "lexical",
   "schema_ver": 1,
-  "stale": false
+  "indexer_ver": 2,
+  "stale": false,
+  "stale_reason": ""
 }
 ```
+
+`indexer_ver` is bumped when the parser/tokenizer/edge-resolver
+semantics change without altering the SQLite layout. `stale` becomes
+true (and `stale_reason` is populated with a one-line user-facing
+message) whenever the on-disk indexer_ver differs from the running
+binary's value, including the legacy case of a pre-tracking index
+(`indexer_ver = 0`). The DB is always readable; the field is a hint
+to run `codemap reindex`.
 
 #### `codemap refs --json` / `codemap calls --json`
 ```json
@@ -839,11 +960,11 @@ This is a stable contract so an agent can branch on the exit code of
 
 | Area | Policy |
 |---|---|
-| Parser workers | Default `runtime.NumCPU()`, override with `--concurrency N` |
+| Parser workers | Default `runtime.NumCPU()`, capped at 16. Set programmatically through `pipeline.IndexOptions.Concurrency`; not exposed as a CLI flag in v0.1.x. |
 | DB writer | Single goroutine (SQLite single writer); fed via channel |
 | File I/O | Walker streams; no full tree held in memory |
 | Memory ceiling | Per-file parse output is held in memory only until the transaction commits, then released |
-| Large files | Files > 1 MiB are skipped by default (configurable) — protects token spend |
+| Large files | Files > 1 MiB are skipped by default. Configurable internally via `walker.Options.MaxFileBytes`; not yet a CLI flag. |
 | Goroutine leaks | Context cancellation propagates to walker, parser, and writer |
 | WAL mode | `journal_mode=WAL` allows reader/writer concurrency (e.g. `status` reads while `index` writes) |
 
@@ -921,8 +1042,10 @@ expected hit.
 | New language | `internal/parser/<lang>/` + `parser.Register` |
 | New embedder | Implement `encoder.Encoder` behind a build tag |
 | Alternative retrieval backend (FTS5 etc.) | Second implementation of `lexical.Index` |
-| Cross-repo search (M5+) | Extend `search.Run` to take `[]repoRoot` |
+| Cross-repo search (post-v1) | Extend `search.Run` to take `[]repoRoot` |
 | New agent SKILL | New case in `skill/paths.go` |
+| Bump indexer semantics (parser / tokenizer / resolver change) | Bump `store.IndexerVer`; users see `stale=true` on next `codemap status` |
+| Self-install destination / PATH wiring | `internal/install/path_<os>.go`; one file per platform |
 
 Anything not on this list is intentionally out of scope for v1 — no
 monitoring, metrics, or plugin loader.
@@ -934,11 +1057,12 @@ monitoring, metrics, or plugin loader.
 | Milestone | Status | Modules in scope | Acceptance |
 |---|---|---|---|
 | M1 | ✅ Done | cli/{init,index,reindex,list,status,forget,search,show,refs,calls}, core, walker, parser/python, lexical, store, registry, pipeline, platform | Useful results on a real Python repo; multi-repo registry works |
-| M2 | ✅ Done | visualize, cli/visualize, lastIndexed surfaced | Static HTML; header populated with lastIndexed, repo path, node/edge counts |
+| M2 | ✅ Done | visualize, cli/visualize, lastIndexed surfaced | Static HTML; header populated with lastIndexed, repo path, node/edge counts. Subsequent v0.1.x added search box, focus-mode edges, dark mode, aside detail panel, and selection-history nav. |
 | M3 | ✅ Done | parser/java, parser/ts (JS+TS+TSX), parser/csharp, parser/cpp | Each language yields correct symbol/edge output on a fixture file; polyglot repo indexes cleanly |
-| M4 | ✅ Done | skill, cli/install-skill, SKILL.md template + golden test, drift guard | Template renders byte-exact; install/uninstall round-trip verified |
+| M4 | ✅ Done | skill, cli/install-skill, SKILL.md template + golden test, drift guard | Template renders byte-exact; install/uninstall round-trip verified. Codex agent target is rejected with a single user-readable message until upstream spec stabilises. |
 | M5 | ✅ Done (placeholder) | encoder (build tag), search rerank path | Both build modes compile; nil-encoder fallback returns BM25 cleanly. Real ONNX session is a one-file swap in `onnx_enabled.go`. |
-| M6 | ✅ Done (release pipeline) | release.yml, GoReleaser config, scripts/zigcc-* wrappers, Homebrew tap stanza | Single-runner zig-cc cross-compile; v* tag triggers GoReleaser. Homebrew tap publishing requires `devchan97/homebrew-tap` and `HOMEBREW_TAP_TOKEN`. |
+| M6 | ✅ Done (release pipeline) | release.yml, GoReleaser config, scripts/zigcc-* wrappers, install/uninstall-self | Single-runner zig-cc cross-compile; `v*` tag triggers GoReleaser. Linux amd64/arm64 + Windows amd64 ship every release; darwin and Windows arm64 are deferred (.goreleaser.yml). End users get on PATH via `codemap install-self` (no admin) or `go install`. |
+| post-M6 | ongoing | indexer_ver, short-range edge resolver, status count consistency, BM25 prefix expansion, install-self, UX polish | v0.1.x patch releases (#5–#12). Issues #1/#2/#3 closed; design.md §15 Q1/Q2/Q6/Q7 resolved, Q3 short-range fix landed. |
 
 ---
 
@@ -955,18 +1079,33 @@ monitoring, metrics, or plugin loader.
 
 ---
 
-## 14. Open Decisions
+## 14. Resolved Decisions
 
-A. **SQLite driver.** `modernc` (pure Go) vs `mattn` (CGO). Tree-sitter is
-   already CGO, so `mattn` is the simplest choice. Decided early in M1.
-B. **BM25 backend.** Custom `tokens` table vs SQLite FTS5 virtual table. The
-   custom path gives more weight-tuning freedom. Start custom in M1; fall
-   back to FTS5 only on perf failure.
-C. **Edge resolution depth.** Cross-file resolution in dynamic languages
-   stays best-effort. v1 marks an edge `resolved=true` only on exact qualname
-   match; everything else stays `resolved=false`.
-D. **Windows path normalisation.** Every stored path is forward-slash; OS
-   conversion happens only in `platform.PathFromRel`. (The dev environment
-   here is Windows, so this is enforced from day one.)
-E. **Tree-sitter grammar pinning.** `go.mod` pins explicit SHAs. The first
-   M1 PR locks them in.
+A. **SQLite driver — `modernc.org/sqlite` (pure Go).** The original
+   note here said `mattn` because tree-sitter is already CGO; the
+   actual M1 implementation chose `modernc.org/sqlite` so that any
+   piece of the codebase that does *not* import a tree-sitter parser
+   (e.g. `internal/store`, `internal/cli`, the entire test suite) can
+   build and run without a C toolchain. tree-sitter's CGO requirement
+   is local to `internal/parser/<lang>/`. Decision: keep modernc.
+B. **BM25 backend — custom `tokens` table.** Started custom in M1 and
+   stayed there: hand-rolled BM25 in `internal/lexical` plus the
+   inverted index in SQLite. PR #5's query-time prefix expansion was
+   a single-file change because of this; FTS5 would have made the
+   same change considerably harder. No fallback needed.
+C. **Edge resolution depth — exact match plus a narrow same-module
+   prefix rewrite.** v1 marked an edge `resolved=true` only on exact
+   qualname match (everything else, including same-module bare-name
+   calls in dynamic languages, stayed unresolved). PR #11 added a
+   second pass: for an unresolved edge whose `to_qualname` has no
+   dot, prepend the `from_qualname`'s module prefix and check
+   whether that produces a known qualname. Type inference,
+   transitive imports, aliasing remain explicit non-goals — design
+   philosophy keeps codemap shallow but cheap rather than reaching
+   for IDE-level accuracy. The bump landed under `IndexerVer = 2`.
+D. **Windows path normalisation.** Every stored path is forward-slash;
+   OS conversion happens only in `platform.PathFromRel`. The dev
+   environment here is Windows, so this is enforced from day one.
+E. **Tree-sitter grammar pinning.** `go.mod` pins explicit SHAs. The
+   first M1 PR locked them in; subsequent bumps go through `go get`
+   like any other dependency.

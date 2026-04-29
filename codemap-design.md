@@ -86,8 +86,8 @@ Implications that shape every decision below:
        ▼                             ▼
   ~/.codemap/                  <repo>/.codemap/
     registry.toml                index.db
-    state.toml (optional)        meta.json
-                                 graph.html
+    state.toml (optional)        graph.html (after `visualize`)
+    bin/codemap (after `install-self`)
 ```
 
 - Per-repo index lives in `<repo>/.codemap/` (gitignored).
@@ -121,7 +121,8 @@ Implications that shape every decision below:
 - **Not a generative LLM.** Specialized encoder; query-time inference is
   <100 ms on CPU, batchable.
 - Used only as a **re-ranker** over L0's top-50, narrowing to top-10.
-- Activation: `--rerank` flag or `.codemap/config.toml` setting.
+- Activation: `--rerank` flag on `codemap search`. There is no
+  per-repo config file in v0.1.x; CLI flags are the only knob.
 
 ### 4.3 What is explicitly excluded
 
@@ -253,7 +254,7 @@ enables:
 
 - `codemap list` from anywhere.
 - `codemap search foo --repo myproject` from anywhere.
-- Cross-repo search later (M5+, optional): `codemap search foo --repo a,b,c`.
+- Cross-repo search later (post-v1; tracked in §15 Q8): `codemap search foo --repo a,b,c`.
 - Visibility into stale indexes (`last_indexed` older than N days).
 
 ---
@@ -266,7 +267,7 @@ Single file `<repo>/.codemap/index.db`. Tables:
 
 ```
 meta(key TEXT PRIMARY KEY, value TEXT)
-   keys: schema_ver | repo_root | indexed_at | embedder
+   keys: schema_ver | indexer_ver | repo_root | indexed_at | embedder
          | symbol_count | file_count
 
 files(path PK, sha1, indexed_at, language, size_bytes)
@@ -274,8 +275,11 @@ files(path PK, sha1, indexed_at, language, size_bytes)
 symbols(id PK, name, qualname, kind, scope, file, line_start, line_end,
         parent_qualname, docstring, snippet, vec BLOB NULLABLE)
 
-edges(from_qualname, to_qualname, kind, resolved BOOL)
+edges(from_qualname, to_qualname, kind, resolved BOOL, file)
    kinds: call | reference | inherit | import
+   note:  the `file` column is what binds an edge to its source; it
+          enables the per-file cascading delete used by incremental
+          re-indexing.
 
 tokens(symbol_id, token, field, weight)        -- inverted index for BM25
    indexed by token for fast lookup
@@ -321,11 +325,31 @@ codemap index <path>
   it is about to edit; if the file is newer, run `codemap index` first
   (this rule is in SKILL.md).
 
-### 7.4 Schema versioning
+### 7.4 Versioning: schema_ver vs indexer_ver
 
-`meta.schema_ver` is bumped when symbol/edge/token shape changes.
-codemap refuses to read a higher schema than it knows; users get a
-clear "schema X, supported up to Y; run `codemap reindex`" message.
+Two version numbers live in `meta`. Different meanings, different
+policies on mismatch:
+
+- **`schema_ver`** — on-disk SQLite layout. Bumped when the table
+  shape, columns, or index structure change in a way that an older
+  binary can no longer read correctly. Mismatch is a **hard error**
+  caught at `Open()` time; the user sees `schema X, supported up to
+  Y; run codemap reindex` and the command exits non-zero. No
+  automatic migration in v1.
+- **`indexer_ver`** — parser / tokenizer / edge-resolver semantics.
+  Bumped when the *meaning* of stored data changes even though the
+  SQLite layout did not (e.g. a tokenizer rule change, a parser
+  emitting qualnames differently, an edge resolver pass that
+  rewrites stored values). Mismatch is **soft**: `Open()` succeeds,
+  search keeps working with the older data, and the difference is
+  surfaced through `codemap status` (`stale = true` plus a
+  one-line `stale_reason`) so the user can decide when to run
+  `codemap reindex`.
+
+The split keeps existing scripts and agent integrations alive across
+indexer-only changes (which historically would have required a hard
+reindex) while still flagging that the index is out of date with the
+running binary.
 
 ---
 
@@ -352,9 +376,13 @@ Symbol        id
               vec?        # only if encoder enabled
 
 Edge          from_qualname
-              to_qualname        # may be unresolved name
+              to_qualname        # may be an unresolved bare name; the
+                                 # short-range resolver in store rewrites
+                                 # bare same-module callees in place
               kind               # call | reference | inherit | import
               resolved : bool
+              file               # source file the edge was discovered in;
+                                 # used by per-file cascading delete
 ```
 
 **Variable mapping (R4) rules.**
@@ -380,13 +408,15 @@ Honors `.gitignore` plus an optional `.codemapignore`. Default excludes:
 
 ### 9.2 Parser
 tree-sitter as the unified backend, one adapter per language implementing
-`parse(file) -> ([Symbol], [Edge])`. Initial set: Python, JavaScript/
-TypeScript, Go, Rust. Files of unknown extension fall back to whole-file
-chunking — still searchable via L0 over content.
+`parse(file) -> ([Symbol], [Edge])`. Files of unknown extension fall back
+to whole-file chunking — still searchable via L0 over content.
 
-Target language set for M3 (user's primary codebases): Java, JavaScript,
-TypeScript, TSX, C#, C++. Go and Rust remain in the adapter registry for
-completeness but are lower priority.
+Languages with full extraction (functions, methods, classes, variables,
+imports, constants + call/reference/inherit/import edges) as of v0.1.x:
+Python, Java, JavaScript, TypeScript, TSX, C#, C++. The `golang` and
+`rust` adapter packages exist as scaffolds (4-line stubs) so the
+registry stays uniform; symbols in those languages currently come from
+the file-level fallback. Filling them in is post-v1 follow-up.
 
 ### 9.3 Indexer
 For each changed file: parse → emit symbols and edges → tokenize for BM25 →
@@ -397,11 +427,21 @@ transaction. Bumps `Meta.indexed_at`.
 Single-file SQLite per repo (§7.1). One global registry TOML.
 
 ### 9.5 Search
-1. Detect query shape (identifier-like vs. natural language).
-2. BM25 over `tokens` → top-50 with structural filters.
-3. If `--rerank` and encoder available: dense re-rank → top-10.
+1. Tokenize the query the same way the index was built (CamelCase /
+   snake_case split, lowercased). Short query terms (≥ 3 chars) are
+   prefix-expanded against stored tokens so e.g. `parse` matches
+   stored `parser`/`parsed` (PR #5; `tokens.token LIKE 'parse%'`).
+2. BM25 over `tokens` → top-50 with structural filters
+   (`--kind`, `--scope`, `--file`).
+3. If `--rerank` and an encoder is available: dense re-rank against
+   `symbols.vec` → top-10.
 4. Emit JSON:
    `[{file, line_start, line_end, qualname, kind, scope, snippet, score, indexed_at}]`.
+
+There is no separate "natural language vs identifier" path inside
+codemap — every query goes through the same lexical pipeline.
+Translating prose into identifier-shaped queries is the agent's job
+(see §4.4 / SKILL.md).
 
 ### 9.6 Graph queries — `refs` (incoming) and `calls` (outgoing)
 Symmetric pair, both backed by the `edges` table.
@@ -412,9 +452,12 @@ This pair is what makes the example query "what functions does
 `main.init` call?" answerable in one round trip.
 
 ### 9.7 Visualizer
-Single static `graph.html`. One CDN dep at view time (vis-network or
-cytoscape.js). Header shows `lastIndexed`, repo path, node/edge counts.
-Filters: kind, scope, file glob.
+Single static `graph.html`. One CDN dep at view time (vis-network).
+Header shows `lastIndexed`, repo path, and node/edge counts; v0.1.x
+also adds a floating search box, focus-mode edges (drawn only for
+the selected node), an aside detail panel with grouped outgoing
+references, dark mode, and selection-history nav with camera
+follow. Render-time filters: `--file` glob, `--kind` set.
 
 ---
 
@@ -435,6 +478,8 @@ Filters: kind, scope, file glob.
 | `codemap visualize [PATH\|NAME]` | Flags: `--out`, `--open`. |
 | `codemap install-skill` | Flags: `--scope user\|project`, `--agent claude-code\|codex`, `--print`. |
 | `codemap uninstall-skill` | — |
+| `codemap install-self` | Copy the running binary to `~/.codemap/bin/codemap{,.exe}` and persist that directory on the user PATH (HKCU\Environment on Windows; a marker block in `~/.bashrc` / `~/.zshrc` / `~/.config/fish/config.fish` / `~/.profile` on Unix). Idempotent; no admin rights needed. |
+| `codemap uninstall-self` | Reverse `install-self`: remove the binary and strip the PATH change. |
 | `codemap version` | Includes index format version + active embedder. |
 
 All commands accept `--json`. Agents always pass `--json`.
@@ -526,15 +571,21 @@ this design document.
 
 ## 12. Distribution
 
-| Channel | Status |
+| Channel | Status (v0.1.x) |
 |---|---|
-| GitHub Releases (darwin-arm64/amd64, linux-arm64/amd64, windows-amd64) | primary |
-| Homebrew tap | yes |
-| `go install github.com/.../codemap@latest` | yes |
-| `curl … \| sh` installer | yes |
+| GitHub Releases — `linux-amd64`, `linux-arm64`, `windows-amd64` | **primary**; published on every `v*` tag via GoReleaser. |
+| GitHub Releases — darwin amd64/arm64 | **deferred**; macOS cross-builds were unstable under the current zig-cc toolchain and are temporarily disabled in `.goreleaser.yml`. Re-enable once a reliable mac path is confirmed. |
+| GitHub Releases — windows arm64 | deferred; zig windows arm64 support is still maturing. |
+| `go install github.com/devchan97/code-map/cmd/codemap@latest` | yes — works wherever the user has Go 1.25+ and a C compiler available locally. |
+| `codemap install-self` (post-download PATH setup) | yes — what most release-zip users run after extracting the archive. See §10 and `internal/install/`. |
+| Homebrew tap | **not yet**; the formula exists in earlier drafts but the `devchan97/homebrew-tap` repo is not published. Will return alongside darwin builds. |
+| `curl … \| sh` bootstrapper | not implemented; `install-self` covers the same use case without an extra hosted script. |
+| Scoop / winget / apt / dnf | future work. |
 
-CI: GitHub Actions + GoReleaser. tree-sitter CGO handled by zig-cc cross
-toolchain so all release artifacts are fully static.
+CI: GitHub Actions + GoReleaser on a single `ubuntu-latest` runner.
+tree-sitter CGO is handled by zig-cc cross-builds so the published
+artifacts are fully static and end users do not need a local C
+toolchain unless they go through `go install`.
 
 ---
 
@@ -544,37 +595,52 @@ toolchain so all release artifacts are fully static.
 codemap/
 ├── cmd/codemap/                 # main package, CLI entrypoint
 ├── internal/
-│   ├── walker/
-│   ├── parser/
-│   │   ├── python/
-│   │   ├── ts/
-│   │   ├── golang/
-│   │   └── rust/
+│   ├── cli/                     # cobra subcommand handlers (thin shims)
+│   ├── core/                    # domain types + sentinel errors
+│   ├── walker/                  # filesystem enumeration + secrets-aware ignore
+│   ├── parser/                  # tree-sitter adapter registry
+│   │   ├── python/              # Python (CGO)
+│   │   ├── java/                # Java (CGO)
+│   │   ├── ts/                  # JavaScript / TypeScript / TSX (CGO)
+│   │   ├── csharp/              # C# (CGO)
+│   │   ├── cpp/                 # C++ (CGO)
+│   │   ├── fallback/            # whole-file fallback for unknown languages
+│   │   ├── golang/              # scaffold (post-v1)
+│   │   └── rust/                # scaffold (post-v1)
 │   ├── lexical/                 # BM25 + tokenization
-│   ├── encoder/                 # optional ONNX rerank
-│   ├── store/                   # SQLite per repo
-│   ├── registry/                # ~/.codemap/registry.toml management
-│   ├── search/
-│   ├── visualize/
-│   └── skill/                   # SKILL.md templating + install
-├── skill/SKILL.md.tmpl
-├── docs/design.md               # this document
-├── .github/workflows/
-└── README.md
+│   ├── encoder/                 # optional ONNX rerank (build tag: encoder)
+│   ├── store/                   # SQLite gateway (modernc.org/sqlite, pure Go)
+│   ├── registry/                # ~/.codemap/registry.toml + 6-step resolver
+│   ├── pipeline/                # init / index / reindex orchestration
+│   ├── search/                  # search.Run + Show
+│   ├── graph/                   # refs + calls
+│   ├── visualize/               # graph.html renderer
+│   ├── skill/                   # SKILL.md installer
+│   ├── install/                 # codemap install-self / uninstall-self
+│   └── platform/                # OS abstraction (paths, atomic write, browser)
+├── skill/SKILL.md.tmpl          # canonical SKILL.md template
+├── scripts/                     # zig-cc wrappers (one per release target)
+├── .github/
+│   ├── assets/                  # README hero GIF and other media
+│   └── workflows/               # ci.yml + release.yml
+├── codemap-design.md            # this document
+├── architecture.md              # module-level architecture
+├── README.md / README-ko.md
+└── go.mod / go.sum
 ```
 
 User runtime layout:
 
 ```
 ~/.codemap/
-├── registry.toml                # all known indexes
-└── state.toml                   # optional: default_repo
+├── registry.toml                # all known indexes (per §6.2)
+├── state.toml                   # optional: default_repo
+└── bin/                         # populated by `codemap install-self`
+    └── codemap{,.exe}           # the running binary, on user PATH
 
 <each-repo>/.codemap/
-├── index.db                     # SQLite
-├── meta.json                    # mirror of meta table for quick reads
-├── config.toml                  # optional, e.g. enable rerank
-└── graph.html                   # visualization
+├── index.db                     # SQLite (per §7.1)
+└── graph.html                   # written by `codemap visualize`
 ```
 
 ---
@@ -589,28 +655,66 @@ User runtime layout:
 | M3 | Multi-language parsers: Java, JavaScript, TypeScript, TSX, C#, C++ (Go/Rust deferred) | ✅ |
 | M4 | `install-skill`, SKILL.md, golden + drift-guard tests | ✅ (end-to-end agent loop is a manual validation step) |
 | M5 | Optional encoder rerank (build-tag split, cosine in `search`) | ✅ placeholder; ONNX session wiring is a one-file swap in `onnx_enabled.go`. Held-out set top-1 validation deferred until a real model is wired. |
-| M6 | Cross-platform releases via zig-cc + GoReleaser; Homebrew tap stanza | ✅ pipeline ready. Tap repo creation + `HOMEBREW_TAP_TOKEN` are manual setup steps before the first tagged release. |
+| M6 | Cross-platform releases via zig-cc + GoReleaser | ✅ for linux amd64/arm64 + windows amd64; darwin and windows arm64 deferred. Homebrew tap pending the darwin path. |
+| post-M6 | v0.1.x patch line — `install-self` for one-shot PATH setup, `indexer_ver` staleness flag, short-range edge resolver, BM25 prefix expansion, status/list count consistency, visualize UX (search box, focus-mode edges, dark mode, aside detail panel, selection history with camera follow, grouped outgoing references). | ✅ (PRs #4–#14 against v0.1.0 → v0.1.4) |
 
 ---
 
-## 15. Open Questions (non-blocking)
+## 15. Open Questions
 
-1. tree-sitter via CGO vs. WASM (purego). CGO simpler at runtime; WASM
-   avoids cross-build pain. Default to CGO for v1.
-2. BM25 implementation: Bleve vs. hand-rolled FTS over SQLite.
-   Hand-rolled is preferred for binary size and weighting control;
-   confirm during M1.
-3. Edge resolution depth for dynamic languages (Python duck typing,
-   JS/TS structural).
-4. Visualization library at scale: vis-network vs. cytoscape.js at 10k+
-   nodes; may need clustering or progressive disclosure.
-5. SKILL spec drift: confirm exact paths and frontmatter for both Claude
-   Code and Codex at release time.
-6. Secrets policy: auto-skip `.env`, `*.pem`, `*.key`, files matching
-   common secret patterns; document overrides.
-7. Monorepo: index per repo root, per workspace, or per declared
-   subproject. Default = per repo root for v1.
-8. Cross-repo search (`--repo a,b,c`) — defer to post-v1.
+Status as of v0.1.x. Resolved items moved to §16; remaining items are
+either deferred (cost outweighs current value) or blocked on upstream
+work outside this repo.
+
+### Resolved (see §16 for the final decision)
+
+- **Q1 — tree-sitter via CGO vs WASM/purego.** Resolved: **CGO**.
+  zig-cc cross-compilation in `release.yml` makes this invisible to
+  end users (single static binary per target). WASM revisited only if
+  cross-build itself becomes a maintenance burden.
+- **Q2 — BM25 hand-rolled vs Bleve.** Resolved: **hand-rolled** (`internal/lexical/bm25.go`,
+  ~64 lines). Confirmed in M1 and validated again by PR #5
+  (query-time prefix expansion was a one-file change; not feasible if
+  Bleve owned the index).
+- **Q6 — secrets policy.** Resolved: implemented in
+  `internal/walker/secrets.go`. Basename match (`.env`), prefix match
+  (`.env.*`), extension/keyfile match (`*.pem`, `*.key`, `id_rsa*`,
+  `id_ed25519*`), plus content scanning for AWS access-key prefix and
+  PEM headers. User overrides via `.codemapignore` (gitignore syntax)
+  or `walker.Options.ExtraIgnores` for embedders.
+- **Q7 — monorepo strategy.** Resolved: **per repo root**, with the
+  registry providing the multi-index handle. A user who wants finer
+  granularity runs `codemap init <subdir>` for each subproject;
+  resolution still works because the registry stores absolute paths.
+
+### Still open
+
+- **Q3 — edge resolution depth for dynamic languages.** Currently
+  parsers emit `to_qualname` as the raw text seen at the call site
+  (e.g. `_cleanup` rather than `module._cleanup`). Same-module
+  unqualified references therefore stay unresolved and `refs`/`calls`
+  on the canvas drop them. A short-range resolver (try the current
+  module's prefix, then transitively-imported aliases) would fix the
+  80% case without paying for a real type system. Type-aware analysis
+  is explicitly **not** on the table — it would push codemap out of
+  the "shallow but cheap" bucket and into IDE territory.
+- **Q4 — visualization at scale.** vis-network has been validated up
+  to ~2k nodes / ~2.5k edges (CC-Pilot fixture) with the
+  focused-edge-mode pattern from PR #4 (edges hidden by default,
+  shown only for the selected node). 10k+ is unverified. Likely
+  remediation if it shows up: cytoscape.js with progressive
+  disclosure / community detection, or simply `--file <glob>` to
+  render a slice. No action until a real >5k repo lands as a user
+  report.
+- **Q5 — SKILL spec drift.** Claude Code paths and frontmatter are
+  pinned (`internal/skill/paths.go` + golden test). Codex still
+  pending upstream; `--agent codex` is rejected with a single
+  user-readable line and `--print` still works for manual placement.
+- **Q8 — cross-repo search (`--repo a,b,c`).** Deferred to post-v1.
+  SQL union over multiple stores is mechanical, but BM25 statistics
+  (avgLen, idf) are corpus-local, so the ranking step needs design
+  work before this is honest. Revisit when an actual user has a
+  multi-repo workflow that the per-repo workflow can't cover.
 
 ---
 
