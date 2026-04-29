@@ -542,6 +542,9 @@ func (t *txImpl) ReadMeta() (core.Meta, error) {
 	if v, ok := kv["schema_ver"]; ok {
 		m.SchemaVer, _ = strconv.Atoi(v)
 	}
+	if v, ok := kv["indexer_ver"]; ok {
+		m.IndexerVer, _ = strconv.Atoi(v)
+	}
 	m.RepoRoot = kv["repo_root"]
 	m.Embedder = kv["embedder"]
 	if v, ok := kv["indexed_at"]; ok {
@@ -562,6 +565,7 @@ func (t *txImpl) WriteMeta(m core.Meta) error {
 	type kv struct{ k, v string }
 	pairs := []kv{
 		{"schema_ver", strconv.Itoa(m.SchemaVer)},
+		{"indexer_ver", strconv.Itoa(m.IndexerVer)},
 		{"repo_root", m.RepoRoot},
 		{"indexed_at", m.IndexedAt.UTC().Format(time.RFC3339)},
 		{"embedder", m.Embedder},

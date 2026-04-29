@@ -300,6 +300,38 @@ func TestStore_SearchBM25_Basic(t *testing.T) {
 	}
 }
 
+// TestStore_Meta_RoundTripsIndexerVer guards that a write/read cycle on the
+// meta table preserves both schema_ver and indexer_ver. Without this, a
+// silently-dropped indexer_ver would defeat the staleness warning that
+// `status` relies on after a parser/tokenizer change.
+func TestStore_Meta_RoundTripsIndexerVer(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	want := core.Meta{
+		SchemaVer: SchemaVer, IndexerVer: IndexerVer,
+		RepoRoot: "/r", IndexedAt: now, Embedder: "lexical",
+		FileCount: 3, SymbolCount: 9,
+	}
+	if err := st.WithTx(ctx, func(tx Tx) error { return tx.WriteMeta(want) }); err != nil {
+		t.Fatal(err)
+	}
+	var got core.Meta
+	if err := st.WithTx(ctx, func(tx Tx) error {
+		var err error
+		got, err = tx.ReadMeta()
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.IndexerVer != want.IndexerVer {
+		t.Errorf("IndexerVer round-trip = %d; want %d", got.IndexerVer, want.IndexerVer)
+	}
+	if got.SchemaVer != want.SchemaVer {
+		t.Errorf("SchemaVer round-trip = %d; want %d", got.SchemaVer, want.SchemaVer)
+	}
+}
+
 // TestStore_SearchBM25_PrefixExpansion guards Issue #2: a query like "parse"
 // must match symbols whose tokens begin with "parse" (e.g. "parser",
 // "parsing"), since BM25 over IN(...) is exact-match and tokens aren't

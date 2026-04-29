@@ -111,7 +111,11 @@ func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOpti
 	if len(changed) == 0 && len(removed) == 0 && !opts.Force {
 		now := time.Now().UTC()
 		var fastSymbols, fastFiles int
-		// Still write updated indexed_at.
+		// Still write updated indexed_at. We deliberately do NOT bump
+		// indexer_ver in the fast path: a no-op walk is exactly the case
+		// where data may be stale relative to the running binary, and
+		// the user wants `status` to keep flagging it until they
+		// explicitly reindex.
 		if err := st.WithTx(ctx, func(tx store.Tx) error {
 			meta, err := tx.ReadMeta()
 			if err != nil {
@@ -303,6 +307,7 @@ func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOpti
 
 		meta := core.Meta{
 			SchemaVer:   store.SchemaVer,
+			IndexerVer:  store.IndexerVer,
 			RepoRoot:    repoRoot,
 			IndexedAt:   now,
 			Embedder:    embedder,
