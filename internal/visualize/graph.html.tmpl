@@ -138,6 +138,52 @@
       border-color: var(--fg-subtle);
     }
 
+    /* ─── Header controls (right cluster: nav + theme) ───────────────────── */
+    .header-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex: 0 0 auto;
+    }
+    .nav-history {
+      display: inline-flex;
+      align-items: center;
+    }
+    .nav-btn {
+      appearance: none;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--fg-muted);
+      width: 36px;
+      height: 36px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      line-height: 1;
+      font-family: var(--font-sans);
+      transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+    }
+    /* Segmented look: round outer corners, share inner border. */
+    .nav-btn:first-child {
+      border-radius: var(--radius) 0 0 var(--radius);
+    }
+    .nav-btn:last-child {
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin-left: -1px; /* collapse the shared border */
+    }
+    .nav-btn:not(:disabled):hover {
+      background: var(--bg-subtle);
+      color: var(--fg);
+      border-color: var(--fg-subtle);
+      z-index: 1; /* hover border on top of the neighbour */
+    }
+    .nav-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
+
     /* ─── Layout ─────────────────────────────────────────────────────────── */
     main {
       flex: 1 1 auto;
@@ -365,6 +411,18 @@
     }
     aside ul.outgoing li.resolved .kind-tag { color: var(--accent); border-color: var(--accent-soft); }
     aside ul.outgoing .target { flex: 1; min-width: 0; }
+    aside ul.outgoing .multi {
+      flex: 0 0 auto;
+      font-family: var(--font-sans);
+      font-size: 0.7rem;
+      letter-spacing: 0.02em;
+      color: var(--fg-subtle);
+      background: var(--bg-elev);
+      padding: 0.05rem 0.4rem;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      font-feature-settings: "tnum";
+    }
     aside pre.snippet {
       background: var(--bg-subtle);
       border: 1px solid var(--border-soft);
@@ -416,7 +474,16 @@
         <span class="value">{{.EdgeCount}}</span>
       </div>
     </div>
-    <button class="theme-toggle" id="themeToggle" type="button" aria-label="Toggle dark mode" title="Toggle theme">◐</button>
+    <div class="header-controls">
+      <div class="nav-history" role="group" aria-label="Selection history">
+        <button class="nav-btn" id="navBack" type="button"
+                aria-label="Previous selected node" title="Back (Alt+Left)" disabled>‹</button>
+        <button class="nav-btn" id="navForward" type="button"
+                aria-label="Next selected node" title="Forward (Alt+Right)" disabled>›</button>
+      </div>
+      <button class="theme-toggle" id="themeToggle" type="button"
+              aria-label="Toggle dark mode" title="Toggle theme">◐</button>
+    </div>
   </header>
   <main>
     <div class="canvas-wrap">
@@ -501,8 +568,18 @@
           },
         },
         physics: {
-          stabilization: { iterations: 200 },
-          barnesHut: { gravitationalConstant: -2400, springLength: 130, springConstant: 0.04 },
+          // fit:false stops vis-network from auto-zoom-fitting after each
+          // stabilization round, which is the cause of the "everything
+          // suddenly springs across the canvas" jolt on first click.
+          stabilization: { iterations: 250, fit: false, updateInterval: 25 },
+          barnesHut: {
+            gravitationalConstant: -2400,
+            springLength: 130,
+            springConstant: 0.04,
+            damping: 0.4, // higher damping → less overshoot when a click wakes physics
+          },
+          minVelocity: 0.75,
+          timestep: 0.4,
         },
         interaction: { hover: true, tooltipDelay: 150 },
       };
@@ -599,17 +676,39 @@
       const locs = (node.locations || [])
         .map(l => `<li>${escapeHTML(l.file)}:${l.line_start}-${l.line_end}</li>`)
         .join('');
+      // Group outgoing edges by (to, kind, resolved) so that calling the
+      // same target several times collapses to one row with an "× N"
+      // multiplier. The raw edges array is preserved on the node so the
+      // canvas still draws every individual arrow on selection.
       const out = (node.outgoing || []);
-      const outItems = out.map(o => {
+      const grouped = [];
+      const groupIdx = new Map();
+      for (const o of out) {
+        const key = (o.resolved ? '+' : '-') + '|' + (o.kind || '') + '|' + (o.to || '');
+        const idx = groupIdx.get(key);
+        if (idx === undefined) {
+          groupIdx.set(key, grouped.length);
+          grouped.push({ ...o, count: 1 });
+        } else {
+          grouped[idx].count++;
+        }
+      }
+      const outItems = grouped.map(o => {
         const cls = o.resolved ? 'resolved' : 'unresolved';
         const dataAttr = o.resolved ? ` data-target="${escapeHTML(o.to)}"` : '';
+        const multiplier = o.count > 1
+          ? `<span class="multi" title="${o.count} occurrences">× ${o.count}</span>`
+          : '';
         return `<li class="${cls}"${dataAttr}>
           <span class="kind-tag">${escapeHTML(o.kind)}</span>
           <span class="target">${escapeHTML(o.to)}</span>
+          ${multiplier}
         </li>`;
       }).join('');
       const outSection = out.length
-        ? `<section><h3>Outgoing references <span class="count">· ${out.length}</span></h3>
+        ? `<section><h3>Outgoing references <span class="count">· ${grouped.length}${
+            grouped.length !== out.length ? ` (${out.length} edges)` : ''
+          }</span></h3>
              <ul class="outgoing">${outItems}</ul></section>`
         : '';
       const snippetSection = node.snippet
@@ -634,15 +733,104 @@
       });
     }
 
+    /* ─── Selection history (header < / > buttons) ─────────────────────── */
+    // Browser-style nav: every fresh selection truncates anything ahead of
+    // the cursor and pushes a new entry. Back/Forward buttons move the
+    // cursor without mutating the stack.
+    const history = [];
+    let historyIdx = -1;
+    let suppressHistory = false;
+    const navBack = document.getElementById('navBack');
+    const navForward = document.getElementById('navForward');
+
+    function updateNavButtons() {
+      navBack.disabled = historyIdx <= 0;
+      navForward.disabled = historyIdx < 0 || historyIdx >= history.length - 1;
+    }
+    function pushHistory(id) {
+      if (suppressHistory) return;
+      // Collapse consecutive duplicates so a re-click doesn't grow history.
+      if (history[historyIdx] === id) return;
+      history.splice(historyIdx + 1);
+      history.push(id);
+      historyIdx = history.length - 1;
+      updateNavButtons();
+    }
+    function navTo(delta) {
+      const target = historyIdx + delta;
+      if (target < 0 || target >= history.length) return;
+      historyIdx = target;
+      suppressHistory = true;
+      try { focusNode(history[historyIdx]); }
+      finally { suppressHistory = false; }
+      updateNavButtons();
+    }
+    navBack.addEventListener('click', () => navTo(-1));
+    navForward.addEventListener('click', () => navTo(1));
+    document.addEventListener('keydown', e => {
+      // Alt+Left/Right mirrors browser convention; ignore when typing in
+      // the search box so the user can still backspace inside the input.
+      if (!e.altKey || document.activeElement === searchInput) return;
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); navTo(-1); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); navTo(1);  }
+    });
+
+    // Camera-follow state: physics keeps moving nodes after a click
+    // (especially in dense clusters), so focus(id) once isn't enough —
+    // the selected node drifts off-screen. Track the active node id and
+    // re-focus on every animation frame until either physics settles or
+    // the user picks a different node.
+    let followId = null;
+    let followRAF = 0;
+    let followStopAt = 0;
+    function startFollowing(id) {
+      followId = id;
+      followStopAt = performance.now() + 2500; // hard cap: 2.5s
+      cancelAnimationFrame(followRAF);
+      const tick = () => {
+        if (followId !== id) return; // a new selection took over
+        const node = network.body.nodes[id];
+        if (!node) return;
+        // Pan the camera to the node's current position. We don't
+        // animate each tick (vis would queue tweens and lag); a direct
+        // moveTo with the live coords is the smooth path here.
+        network.moveTo({
+          position: { x: node.x, y: node.y },
+          scale: network.getScale(),
+        });
+        // Stop once physics settles (vis stops dispatching dragEnd-like
+        // motion when velocity is below minVelocity) or we hit the cap.
+        if (performance.now() >= followStopAt) return;
+        followRAF = requestAnimationFrame(tick);
+      };
+      // Initial smooth zoom-in, then start the tick loop after the
+      // animation completes.
+      network.focus(id, {
+        scale: 1.2,
+        animation: { duration: 400, easingFunction: 'easeInOutQuad' },
+      });
+      setTimeout(() => {
+        if (followId === id) followRAF = requestAnimationFrame(tick);
+      }, 400);
+    }
+    // Stop following as soon as the user starts panning/zooming manually
+    // — the physics-induced drift we want to compensate for is short, but
+    // a user gesture should never get fought.
+    function stopFollowing() {
+      followId = null;
+      cancelAnimationFrame(followRAF);
+    }
+
     function focusNode(id) {
       if (!nodeById.has(id)) return;
       // vis-network suppresses the selectNode event for programmatic
       // selectNodes() calls, so trigger the same render+edge-show pipeline
       // by hand. Keeps search/aside-link/canvas-click behaviorally identical.
       network.selectNodes([id]);
-      network.focus(id, { scale: 1.2, animation: { duration: 400, easingFunction: 'easeInOutQuad' } });
       renderNode(nodeById.get(id));
       applyFocus(id);
+      pushHistory(id);
+      startFollowing(id);
     }
 
     function applyFocus(id) {
@@ -708,16 +896,22 @@
 
     network.on('selectNode', params => {
       const id = params.nodes[0];
-      const node = nodeById.get(id);
-      if (node) {
-        renderNode(node);
-        applyFocus(id);
-      }
+      if (!nodeById.has(id)) return;
+      // Route canvas clicks through focusNode so the camera follows
+      // selections that land off-screen (a common case in dense
+      // clusters) and history captures every selection — not just
+      // search and aside-link selections.
+      focusNode(id);
     });
     network.on('deselectNode', () => {
       renderEmpty();
       clearFocus();
+      stopFollowing();
     });
+    // User-initiated camera gestures must abort follow immediately;
+    // otherwise the requestAnimationFrame loop yanks the view back.
+    network.on('dragStart', stopFollowing);
+    network.on('zoom', stopFollowing);
 
     /* ─── Search ───────────────────────────────────────────────────────── */
     const searchEl = document.getElementById('search');
