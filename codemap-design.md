@@ -321,11 +321,31 @@ codemap index <path>
   it is about to edit; if the file is newer, run `codemap index` first
   (this rule is in SKILL.md).
 
-### 7.4 Schema versioning
+### 7.4 Versioning: schema_ver vs indexer_ver
 
-`meta.schema_ver` is bumped when symbol/edge/token shape changes.
-codemap refuses to read a higher schema than it knows; users get a
-clear "schema X, supported up to Y; run `codemap reindex`" message.
+Two version numbers live in `meta`. Different meanings, different
+policies on mismatch:
+
+- **`schema_ver`** — on-disk SQLite layout. Bumped when the table
+  shape, columns, or index structure change in a way that an older
+  binary can no longer read correctly. Mismatch is a **hard error**
+  caught at `Open()` time; the user sees `schema X, supported up to
+  Y; run codemap reindex` and the command exits non-zero. No
+  automatic migration in v1.
+- **`indexer_ver`** — parser / tokenizer / edge-resolver semantics.
+  Bumped when the *meaning* of stored data changes even though the
+  SQLite layout did not (e.g. a tokenizer rule change, a parser
+  emitting qualnames differently, an edge resolver pass that
+  rewrites stored values). Mismatch is **soft**: `Open()` succeeds,
+  search keeps working with the older data, and the difference is
+  surfaced through `codemap status` (`stale = true` plus a
+  one-line `stale_reason`) so the user can decide when to run
+  `codemap reindex`.
+
+The split keeps existing scripts and agent integrations alive across
+indexer-only changes (which historically would have required a hard
+reindex) while still flagging that the index is out of date with the
+running binary.
 
 ---
 
@@ -435,6 +455,8 @@ Filters: kind, scope, file glob.
 | `codemap visualize [PATH\|NAME]` | Flags: `--out`, `--open`. |
 | `codemap install-skill` | Flags: `--scope user\|project`, `--agent claude-code\|codex`, `--print`. |
 | `codemap uninstall-skill` | — |
+| `codemap install-self` | Copy the running binary to `~/.codemap/bin/codemap{,.exe}` and persist that directory on the user PATH (HKCU\Environment on Windows; a marker block in `~/.bashrc` / `~/.zshrc` / `~/.config/fish/config.fish` / `~/.profile` on Unix). Idempotent; no admin rights needed. |
+| `codemap uninstall-self` | Reverse `install-self`: remove the binary and strip the PATH change. |
 | `codemap version` | Includes index format version + active embedder. |
 
 All commands accept `--json`. Agents always pass `--json`.
@@ -526,15 +548,21 @@ this design document.
 
 ## 12. Distribution
 
-| Channel | Status |
+| Channel | Status (v0.1.x) |
 |---|---|
-| GitHub Releases (darwin-arm64/amd64, linux-arm64/amd64, windows-amd64) | primary |
-| Homebrew tap | yes |
-| `go install github.com/.../codemap@latest` | yes |
-| `curl … \| sh` installer | yes |
+| GitHub Releases — `linux-amd64`, `linux-arm64`, `windows-amd64` | **primary**; published on every `v*` tag via GoReleaser. |
+| GitHub Releases — darwin amd64/arm64 | **deferred**; macOS cross-builds were unstable under the current zig-cc toolchain and are temporarily disabled in `.goreleaser.yml`. Re-enable once a reliable mac path is confirmed. |
+| GitHub Releases — windows arm64 | deferred; zig windows arm64 support is still maturing. |
+| `go install github.com/devchan97/code-map/cmd/codemap@latest` | yes — works wherever the user has Go 1.25+ and a C compiler available locally. |
+| `codemap install-self` (post-download PATH setup) | yes — what most release-zip users run after extracting the archive. See §10 and `internal/install/`. |
+| Homebrew tap | **not yet**; the formula exists in earlier drafts but the `devchan97/homebrew-tap` repo is not published. Will return alongside darwin builds. |
+| `curl … \| sh` bootstrapper | not implemented; `install-self` covers the same use case without an extra hosted script. |
+| Scoop / winget / apt / dnf | future work. |
 
-CI: GitHub Actions + GoReleaser. tree-sitter CGO handled by zig-cc cross
-toolchain so all release artifacts are fully static.
+CI: GitHub Actions + GoReleaser on a single `ubuntu-latest` runner.
+tree-sitter CGO is handled by zig-cc cross-builds so the published
+artifacts are fully static and end users do not need a local C
+toolchain unless they go through `go install`.
 
 ---
 
