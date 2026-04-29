@@ -72,6 +72,14 @@ func TestIndex_FreshRepo(t *testing.T) {
 	if sum.IndexedAt.IsZero() {
 		t.Error("IndexedAt zero")
 	}
+	// Issue #1: TotalSymbols / TotalFiles must reflect the cumulative state
+	// written to meta (so registry mirror and `status` agree).
+	if sum.TotalFiles != 2 {
+		t.Errorf("TotalFiles = %d; want 2", sum.TotalFiles)
+	}
+	if sum.TotalSymbols != sum.Symbols {
+		t.Errorf("on a fresh repo TotalSymbols (%d) must equal Symbols (%d)", sum.TotalSymbols, sum.Symbols)
+	}
 }
 
 func TestIndex_IncrementalSkipsUnchanged(t *testing.T) {
@@ -96,6 +104,15 @@ func TestIndex_IncrementalSkipsUnchanged(t *testing.T) {
 	}
 	if sum.Parsed != 0 {
 		t.Errorf("expected 0 parsed on no-op run; got %d", sum.Parsed)
+	}
+	// Issue #1 regression: TotalFiles/TotalSymbols must reflect the
+	// cumulative index state, not just what was inserted in this run
+	// (which is 0 for a no-op). Symbols=0 but TotalSymbols must remain >0.
+	if sum.TotalFiles != 1 {
+		t.Errorf("TotalFiles after no-op run = %d; want 1 (cumulative)", sum.TotalFiles)
+	}
+	if sum.TotalSymbols == 0 {
+		t.Errorf("TotalSymbols after no-op run = 0; want the cumulative count")
 	}
 }
 

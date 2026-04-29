@@ -65,8 +65,8 @@ SHA-1 has changed since the previous run.`,
 				repoCanon, _ := canonicalPath(repoRoot)
 				if canon == repoCanon {
 					e.LastIndexed = sum.IndexedAt
-					e.FileCount = sum.Parsed + sum.Skipped
-					e.SymbolCount = sum.Symbols
+					e.FileCount = sum.TotalFiles
+					e.SymbolCount = sum.TotalSymbols
 					_ = reg.Upsert(e)
 					break
 				}
