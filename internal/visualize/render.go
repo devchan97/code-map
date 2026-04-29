@@ -102,15 +102,31 @@ func Render(ctx context.Context, ds DataSource, repoRoot string, opts Options) (
 	}
 
 	// 5. Build nodes; index qualnames for endpoint filtering.
-	nodeSet := make(map[string]struct{}, len(symbols))
+	//
+	// vis-network's DataSet rejects duplicate ids with
+	//   "Cannot add item: item with id <x> already exists"
+	// and stops loading the remaining nodes — leaving the canvas blank.
+	// Edges are keyed by qualname (see core.Edge), so the node id must also
+	// be the qualname; when two symbols share a qualname (common when a
+	// parser is in scaffold state and emits one file-level symbol per file
+	// using the basename) we collapse them into a single node and append
+	// the additional locations to the tooltip rather than producing a
+	// duplicate id. Once parsers emit fully-qualified names (pkg.Func),
+	// collisions disappear naturally.
+	nodeSet := make(map[string]int, len(symbols))
 	nodes := make([]graphNode, 0, len(symbols))
 	for _, s := range symbols {
-		nodeSet[s.Qualname] = struct{}{}
+		loc := fmt.Sprintf("%s:%d-%d", s.File, s.LineStart, s.LineEnd)
+		if idx, dup := nodeSet[s.Qualname]; dup {
+			nodes[idx].Title += "\n" + loc
+			continue
+		}
+		nodeSet[s.Qualname] = len(nodes)
 		nodes = append(nodes, graphNode{
 			ID:    s.Qualname,
 			Label: s.Name,
 			Group: string(s.Kind),
-			Title: fmt.Sprintf("%s:%d-%d", s.File, s.LineStart, s.LineEnd),
+			Title: loc,
 		})
 	}
 
