@@ -1,6 +1,20 @@
-.PHONY: build vet ci release-snapshot
+.PHONY: build vet ci release-snapshot check-cgo
 
-build:
+# CGO_ENABLED=1 is required: every tree-sitter language adapter pulls in C code.
+# Without CGO, all parsers silently fall back to the whole-file adapter, producing
+# 1 symbol per file and 0 edges. We force it here and verify a C compiler is reachable.
+export CGO_ENABLED=1
+
+check-cgo:
+	@command -v $${CC:-gcc} >/dev/null 2>&1 || { \
+		echo "error: C compiler not found (CC=$${CC:-gcc}). CGO is required for tree-sitter parsers."; \
+		echo "  macOS:    xcode-select --install"; \
+		echo "  Linux:    apt install build-essential   (or distro equivalent)"; \
+		echo "  Windows:  install msys2 mingw64 and add C:/msys64/mingw64/bin to PATH"; \
+		exit 1; \
+	}
+
+build: check-cgo
 	go build -o bin/codemap ./cmd/codemap
 
 vet:
