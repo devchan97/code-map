@@ -79,6 +79,10 @@ func TestRender_WritesHTMLWithMeta(t *testing.T) {
 		`id="searchInput"`,
 		`runSearch`,
 		`Outgoing references`,
+		// header history nav buttons
+		`id="navBack"`,
+		`id="navForward"`,
+		`pushHistory`,
 		// the synthetic edge a.foo -> a.Bar must show up in node.outgoing
 		`"to":"a.Bar"`,
 		// snippet must travel into the node payload so the panel can render it
