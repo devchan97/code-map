@@ -90,7 +90,14 @@ func InstallSelf(selfPath string) (Result, error) {
 	}
 	destAbs, _ := filepath.Abs(dest)
 
-	if !sameFile(srcAbs, destAbs) {
+	// Skip the copy when src and dest are the same inode (re-run from
+	// the installed location) OR when an existing dest already matches
+	// src in size and mtime. The latter keeps `install-self` idempotent
+	// when the user runs it twice from the same downloaded zip without
+	// reading the entire binary back to compare hashes. A real version
+	// upgrade rewrites the file with a new mtime/size, which triggers
+	// a fresh copy.
+	if !sameFile(srcAbs, destAbs) && !destMatchesSrc(srcAbs, destAbs) {
 		if err := copyExecutable(srcAbs, destAbs); err != nil {
 			return res, fmt.Errorf("install: copy binary: %w", err)
 		}
@@ -142,14 +149,35 @@ func sameFile(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
+// destMatchesSrc reports whether dest exists and has the same Size and
+// ModTime as src — a cheap heuristic that keeps install-self idempotent
+// without re-reading the entire binary. A real version upgrade rewrites
+// the file with a new ModTime, so the comparison stays correct in
+// practice.
+func destMatchesSrc(src, dest string) bool {
+	si, errS := os.Stat(src)
+	di, errD := os.Stat(dest)
+	if errS != nil || errD != nil {
+		return false
+	}
+	return si.Size() == di.Size() && si.ModTime().Equal(di.ModTime())
+}
+
 // copyExecutable atomically replaces dest with a copy of src and
-// preserves the executable bit on Unix.
+// preserves the executable bit and source mtime on Unix. Carrying the
+// mtime over makes destMatchesSrc cheap: a second install-self from
+// the same source file is a no-op without hashing the binary.
 func copyExecutable(src, dest string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+
+	srcInfo, err := in.Stat()
+	if err != nil {
+		return err
+	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(dest), ".codemap-install-*")
 	if err != nil {
@@ -168,6 +196,10 @@ func copyExecutable(src, dest string) error {
 		return err
 	}
 	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Chtimes(tmpPath, srcInfo.ModTime(), srcInfo.ModTime()); err != nil {
 		cleanup()
 		return err
 	}
