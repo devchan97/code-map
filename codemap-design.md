@@ -86,8 +86,8 @@ Implications that shape every decision below:
        ▼                             ▼
   ~/.codemap/                  <repo>/.codemap/
     registry.toml                index.db
-    state.toml (optional)        meta.json
-                                 graph.html
+    state.toml (optional)        graph.html (after `visualize`)
+    bin/codemap (after `install-self`)
 ```
 
 - Per-repo index lives in `<repo>/.codemap/` (gitignored).
@@ -266,7 +266,7 @@ Single file `<repo>/.codemap/index.db`. Tables:
 
 ```
 meta(key TEXT PRIMARY KEY, value TEXT)
-   keys: schema_ver | repo_root | indexed_at | embedder
+   keys: schema_ver | indexer_ver | repo_root | indexed_at | embedder
          | symbol_count | file_count
 
 files(path PK, sha1, indexed_at, language, size_bytes)
@@ -274,8 +274,11 @@ files(path PK, sha1, indexed_at, language, size_bytes)
 symbols(id PK, name, qualname, kind, scope, file, line_start, line_end,
         parent_qualname, docstring, snippet, vec BLOB NULLABLE)
 
-edges(from_qualname, to_qualname, kind, resolved BOOL)
+edges(from_qualname, to_qualname, kind, resolved BOOL, file)
    kinds: call | reference | inherit | import
+   note:  the `file` column is what binds an edge to its source; it
+          enables the per-file cascading delete used by incremental
+          re-indexing.
 
 tokens(symbol_id, token, field, weight)        -- inverted index for BM25
    indexed by token for fast lookup
@@ -400,13 +403,15 @@ Honors `.gitignore` plus an optional `.codemapignore`. Default excludes:
 
 ### 9.2 Parser
 tree-sitter as the unified backend, one adapter per language implementing
-`parse(file) -> ([Symbol], [Edge])`. Initial set: Python, JavaScript/
-TypeScript, Go, Rust. Files of unknown extension fall back to whole-file
-chunking — still searchable via L0 over content.
+`parse(file) -> ([Symbol], [Edge])`. Files of unknown extension fall back
+to whole-file chunking — still searchable via L0 over content.
 
-Target language set for M3 (user's primary codebases): Java, JavaScript,
-TypeScript, TSX, C#, C++. Go and Rust remain in the adapter registry for
-completeness but are lower priority.
+Languages with full extraction (functions, methods, classes, variables,
+imports, constants + call/reference/inherit/import edges) as of v0.1.x:
+Python, Java, JavaScript, TypeScript, TSX, C#, C++. The `golang` and
+`rust` adapter packages exist as scaffolds (4-line stubs) so the
+registry stays uniform; symbols in those languages currently come from
+the file-level fallback. Filling them in is post-v1 follow-up.
 
 ### 9.3 Indexer
 For each changed file: parse → emit symbols and edges → tokenize for BM25 →
@@ -572,37 +577,52 @@ toolchain unless they go through `go install`.
 codemap/
 ├── cmd/codemap/                 # main package, CLI entrypoint
 ├── internal/
-│   ├── walker/
-│   ├── parser/
-│   │   ├── python/
-│   │   ├── ts/
-│   │   ├── golang/
-│   │   └── rust/
+│   ├── cli/                     # cobra subcommand handlers (thin shims)
+│   ├── core/                    # domain types + sentinel errors
+│   ├── walker/                  # filesystem enumeration + secrets-aware ignore
+│   ├── parser/                  # tree-sitter adapter registry
+│   │   ├── python/              # Python (CGO)
+│   │   ├── java/                # Java (CGO)
+│   │   ├── ts/                  # JavaScript / TypeScript / TSX (CGO)
+│   │   ├── csharp/              # C# (CGO)
+│   │   ├── cpp/                 # C++ (CGO)
+│   │   ├── fallback/            # whole-file fallback for unknown languages
+│   │   ├── golang/              # scaffold (post-v1)
+│   │   └── rust/                # scaffold (post-v1)
 │   ├── lexical/                 # BM25 + tokenization
-│   ├── encoder/                 # optional ONNX rerank
-│   ├── store/                   # SQLite per repo
-│   ├── registry/                # ~/.codemap/registry.toml management
-│   ├── search/
-│   ├── visualize/
-│   └── skill/                   # SKILL.md templating + install
-├── skill/SKILL.md.tmpl
-├── docs/design.md               # this document
-├── .github/workflows/
-└── README.md
+│   ├── encoder/                 # optional ONNX rerank (build tag: encoder)
+│   ├── store/                   # SQLite gateway (modernc.org/sqlite, pure Go)
+│   ├── registry/                # ~/.codemap/registry.toml + 6-step resolver
+│   ├── pipeline/                # init / index / reindex orchestration
+│   ├── search/                  # search.Run + Show
+│   ├── graph/                   # refs + calls
+│   ├── visualize/               # graph.html renderer
+│   ├── skill/                   # SKILL.md installer
+│   ├── install/                 # codemap install-self / uninstall-self
+│   └── platform/                # OS abstraction (paths, atomic write, browser)
+├── skill/SKILL.md.tmpl          # canonical SKILL.md template
+├── scripts/                     # zig-cc wrappers (one per release target)
+├── .github/
+│   ├── assets/                  # README hero GIF and other media
+│   └── workflows/               # ci.yml + release.yml
+├── codemap-design.md            # this document
+├── architecture.md              # module-level architecture
+├── README.md / README-ko.md
+└── go.mod / go.sum
 ```
 
 User runtime layout:
 
 ```
 ~/.codemap/
-├── registry.toml                # all known indexes
-└── state.toml                   # optional: default_repo
+├── registry.toml                # all known indexes (per §6.2)
+├── state.toml                   # optional: default_repo
+└── bin/                         # populated by `codemap install-self`
+    └── codemap{,.exe}           # the running binary, on user PATH
 
 <each-repo>/.codemap/
-├── index.db                     # SQLite
-├── meta.json                    # mirror of meta table for quick reads
-├── config.toml                  # optional, e.g. enable rerank
-└── graph.html                   # visualization
+├── index.db                     # SQLite (per §7.1)
+└── graph.html                   # written by `codemap visualize`
 ```
 
 ---
@@ -617,7 +637,8 @@ User runtime layout:
 | M3 | Multi-language parsers: Java, JavaScript, TypeScript, TSX, C#, C++ (Go/Rust deferred) | ✅ |
 | M4 | `install-skill`, SKILL.md, golden + drift-guard tests | ✅ (end-to-end agent loop is a manual validation step) |
 | M5 | Optional encoder rerank (build-tag split, cosine in `search`) | ✅ placeholder; ONNX session wiring is a one-file swap in `onnx_enabled.go`. Held-out set top-1 validation deferred until a real model is wired. |
-| M6 | Cross-platform releases via zig-cc + GoReleaser; Homebrew tap stanza | ✅ pipeline ready. Tap repo creation + `HOMEBREW_TAP_TOKEN` are manual setup steps before the first tagged release. |
+| M6 | Cross-platform releases via zig-cc + GoReleaser | ✅ for linux amd64/arm64 + windows amd64; darwin and windows arm64 deferred. Homebrew tap pending the darwin path. |
+| post-M6 | v0.1.x patch line — `install-self` for one-shot PATH setup, `indexer_ver` staleness flag, short-range edge resolver, BM25 prefix expansion, status/list count consistency, visualize UX (search box, focus-mode edges, dark mode, aside detail panel, selection history with camera follow, grouped outgoing references). | ✅ (PRs #4–#14 against v0.1.0 → v0.1.4) |
 
 ---
 
