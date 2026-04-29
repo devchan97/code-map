@@ -274,6 +274,9 @@ scripts/                     # zig-cc wrapper (릴리스 타깃별)
 - **Secret 회피 walker.** 흔한 시크릿 패턴 (`.env`, `*.pem`, `*.key`,
   `id_rsa*`, `id_ed25519*`, ...) 에 매칭되는 파일은 본문 읽기 전에 스킵됩니다.
   내용 스캔에서 AWS 액세스 키 prefix 나 PEM 헤더가 있으면 거부됩니다.
+  추가 경로를 제외하거나 프로젝트별로 기본값을 덮어쓰려면 레포 루트에
+  `.codemapignore` 파일 (gitignore 문법) 을 두세요. `.gitignore` 와 함께
+  매 walk 마다 적용됩니다.
 - **텔레메트리 없음.** codemap 은 외부로 데이터를 보내지 않습니다.
 
 ## 개발
