@@ -278,7 +278,9 @@ scripts/                     # zig-cc wrapper scripts (one per release target)
 - **Secrets-aware walker.** Files matching common secret patterns
   (`.env`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, ...) are skipped before
   reading. Content scanning rejects files containing AWS access-key prefixes
-  or PEM headers.
+  or PEM headers. To exclude additional paths or to override the defaults
+  for a project, drop a `.codemapignore` file at the repo root (gitignore
+  syntax). It is honored alongside `.gitignore` on every walk.
 - **No telemetry.** codemap does not phone home.
 
 ## Development

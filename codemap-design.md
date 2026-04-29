@@ -593,24 +593,61 @@ User runtime layout:
 
 ---
 
-## 15. Open Questions (non-blocking)
+## 15. Open Questions
 
-1. tree-sitter via CGO vs. WASM (purego). CGO simpler at runtime; WASM
-   avoids cross-build pain. Default to CGO for v1.
-2. BM25 implementation: Bleve vs. hand-rolled FTS over SQLite.
-   Hand-rolled is preferred for binary size and weighting control;
-   confirm during M1.
-3. Edge resolution depth for dynamic languages (Python duck typing,
-   JS/TS structural).
-4. Visualization library at scale: vis-network vs. cytoscape.js at 10k+
-   nodes; may need clustering or progressive disclosure.
-5. SKILL spec drift: confirm exact paths and frontmatter for both Claude
-   Code and Codex at release time.
-6. Secrets policy: auto-skip `.env`, `*.pem`, `*.key`, files matching
-   common secret patterns; document overrides.
-7. Monorepo: index per repo root, per workspace, or per declared
-   subproject. Default = per repo root for v1.
-8. Cross-repo search (`--repo a,b,c`) — defer to post-v1.
+Status as of v0.1.x. Resolved items moved to §16; remaining items are
+either deferred (cost outweighs current value) or blocked on upstream
+work outside this repo.
+
+### Resolved (see §16 for the final decision)
+
+- **Q1 — tree-sitter via CGO vs WASM/purego.** Resolved: **CGO**.
+  zig-cc cross-compilation in `release.yml` makes this invisible to
+  end users (single static binary per target). WASM revisited only if
+  cross-build itself becomes a maintenance burden.
+- **Q2 — BM25 hand-rolled vs Bleve.** Resolved: **hand-rolled** (`internal/lexical/bm25.go`,
+  ~64 lines). Confirmed in M1 and validated again by PR #5
+  (query-time prefix expansion was a one-file change; not feasible if
+  Bleve owned the index).
+- **Q6 — secrets policy.** Resolved: implemented in
+  `internal/walker/secrets.go`. Basename match (`.env`), prefix match
+  (`.env.*`), extension/keyfile match (`*.pem`, `*.key`, `id_rsa*`,
+  `id_ed25519*`), plus content scanning for AWS access-key prefix and
+  PEM headers. User overrides via `.codemapignore` (gitignore syntax)
+  or `walker.Options.ExtraIgnores` for embedders.
+- **Q7 — monorepo strategy.** Resolved: **per repo root**, with the
+  registry providing the multi-index handle. A user who wants finer
+  granularity runs `codemap init <subdir>` for each subproject;
+  resolution still works because the registry stores absolute paths.
+
+### Still open
+
+- **Q3 — edge resolution depth for dynamic languages.** Currently
+  parsers emit `to_qualname` as the raw text seen at the call site
+  (e.g. `_cleanup` rather than `module._cleanup`). Same-module
+  unqualified references therefore stay unresolved and `refs`/`calls`
+  on the canvas drop them. A short-range resolver (try the current
+  module's prefix, then transitively-imported aliases) would fix the
+  80% case without paying for a real type system. Type-aware analysis
+  is explicitly **not** on the table — it would push codemap out of
+  the "shallow but cheap" bucket and into IDE territory.
+- **Q4 — visualization at scale.** vis-network has been validated up
+  to ~2k nodes / ~2.5k edges (CC-Pilot fixture) with the
+  focused-edge-mode pattern from PR #4 (edges hidden by default,
+  shown only for the selected node). 10k+ is unverified. Likely
+  remediation if it shows up: cytoscape.js with progressive
+  disclosure / community detection, or simply `--file <glob>` to
+  render a slice. No action until a real >5k repo lands as a user
+  report.
+- **Q5 — SKILL spec drift.** Claude Code paths and frontmatter are
+  pinned (`internal/skill/paths.go` + golden test). Codex still
+  pending upstream; `--agent codex` is rejected with a single
+  user-readable line and `--print` still works for manual placement.
+- **Q8 — cross-repo search (`--repo a,b,c`).** Deferred to post-v1.
+  SQL union over multiple stores is mechanical, but BM25 statistics
+  (avgLen, idf) are corpus-local, so the ranking step needs design
+  work before this is honest. Revisit when an actual user has a
+  multi-repo workflow that the per-repo workflow can't cover.
 
 ---
 
