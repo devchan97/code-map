@@ -29,6 +29,8 @@ func NewRoot() *cobra.Command {
 		newVisualizeCmd(),
 		newInstallSkillCmd(),
 		newUninstallSkillCmd(),
+		newInstallSelfCmd(),
+		newUninstallSelfCmd(),
 		newVersionCmd(),
 	)
 
