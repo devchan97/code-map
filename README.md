@@ -7,6 +7,8 @@ and serves precise `file:line` lookups to coding agents (Claude Code, Codex).
 **No LLM** — codemap is a pure retrieval layer; the calling agent supplies all
 reasoning.
 
+![codemap visualize — interactive symbol graph with search, focus mode, and dark mode](.github/assets/preview.gif)
+
 ```
 agent  →  "where is the rate-limit logic?"
 codemap →  src/api/middleware.py:142-178   func apply_rate_limit

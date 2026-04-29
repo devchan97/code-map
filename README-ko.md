@@ -7,6 +7,8 @@
 **LLM 없음** — codemap 은 순수 retrieval layer 이며, 모든 추론은 호출하는
 에이전트가 담당합니다.
 
+![codemap visualize — 검색·포커스·다크모드를 갖춘 인터랙티브 심볼 그래프](.github/assets/preview.gif)
+
 ```
 agent  →  "rate-limit 로직 어디 있어?"
 codemap →  src/api/middleware.py:142-178   func apply_rate_limit
