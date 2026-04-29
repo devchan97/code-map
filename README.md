@@ -99,7 +99,8 @@ Requires **Go 1.25+** and a **C toolchain** (CGO is enabled by tree-sitter).
 go build ./cmd/codemap
 ```
 
-For optional encoder rerank support (placeholder in v1, ONNX in M5):
+For optional encoder rerank support (placeholder in v0.1.x; the
+ONNX session wiring is a one-file swap in `internal/encoder/onnx_enabled.go`):
 
 ```sh
 go build -tags encoder ./cmd/codemap
@@ -210,7 +211,7 @@ the public contract — see `architecture.md` §6.2.
    │
    ▼
 walker → parser (tree-sitter) → lexical (BM25) → store (SQLite)
-                                 └─ encoder rerank (optional, M5)
+                                 └─ encoder rerank (optional, build-tag)
 ```
 
 - The CLI process is short-lived; every invocation re-opens the SQLite file.
@@ -264,6 +265,7 @@ internal/
   graph/                     # refs + calls
   visualize/                 # graph.html renderer
   skill/                     # SKILL.md installer
+  install/                   # codemap install-self / uninstall-self
   platform/                  # OS abstraction (paths, atomic write, browser)
 skill/SKILL.md.tmpl          # canonical SKILL.md template
 scripts/                     # zig-cc wrapper scripts (one per release target)

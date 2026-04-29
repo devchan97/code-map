@@ -53,13 +53,12 @@
 └──────────┬──────────────────────────────┬───────────────────────┘
            │                              │
            ▼                              ▼
-┌──────────────────────┐         ┌──────────────────────────┐
-│ ~/.codemap/          │         │ <repo>/.codemap/         │
-│   registry.toml      │         │   index.db    (SQLite)   │
-│   state.toml (opt)   │         │   meta.json   (mirror)   │
-│                      │         │   config.toml (opt)      │
-│                      │         │   graph.html  (visualize)│
-└──────────────────────┘         └──────────────────────────┘
+┌──────────────────────────────┐ ┌──────────────────────────┐
+│ ~/.codemap/                  │ │ <repo>/.codemap/         │
+│   registry.toml              │ │   index.db    (SQLite)   │
+│   state.toml          (opt)  │ │   graph.html  (visualize)│
+│   bin/codemap{,.exe}  (opt)  │ │                          │
+└──────────────────────────────┘ └──────────────────────────┘
 ```
 
 - A new process is spawned per invocation (no daemon). Therefore **all state
@@ -201,7 +200,7 @@ codemap/
 ### 2.1 Dependency Rules (enforced)
 
 ```
-cli ──► search / pipeline / graph / visualize / skill / registry
+cli ──► search / pipeline / graph / visualize / skill / install / registry
         │
         ▼
    store ◄── pipeline, search, graph, visualize
@@ -210,6 +209,7 @@ cli ──► search / pipeline / graph / visualize / skill / registry
    lexical ◄── pipeline (write), search (read)
    encoder ◄── search (optional, build tag)
    registry ◄── cli, pipeline, search
+   install ◄── cli            (codemap install-self / uninstall-self)
    core    ◄── (importable from anywhere; depends on nothing internal)
    platform ◄── almost every module
 ```
@@ -455,22 +455,26 @@ wrapping.
 - **Public surface.**
   ```go
   type IndexOptions struct {
-      Force      bool   // reindex
-      Concurrency int   // parser workers
-      Encoder    encoder.Encoder // optional
+      Force       bool             // reindex
+      Concurrency int              // parser workers; defaults to runtime.NumCPU()
+      Encoder     encoder.Encoder  // optional
+      Progress    io.Writer        // human-readable progress (defaults to os.Stderr)
   }
 
   type Summary struct {
-      ParsedFiles  int
-      SkippedFiles int
-      Symbols      int
-      Edges        int
+      Parsed       int           // files (re-)parsed in this run
+      Skipped      int           // unchanged-SHA1 or parse-error skips
+      Removed      int           // files deleted from disk and from the index
+      Symbols      int           // symbols inserted in this run
+      Edges        int           // edges inserted in this run
+      TotalSymbols int           // cumulative symbol count after this run
+      TotalFiles   int           // cumulative file count after this run
       Duration     time.Duration
       IndexedAt    time.Time
   }
 
-  func Index(ctx context.Context, repoRoot string, opts IndexOptions) (Summary, error)
-  func Reindex(ctx context.Context, repoRoot string, opts IndexOptions) (Summary, error)
+  func Index(ctx context.Context, st *store.Store, repoRoot string, opts IndexOptions) (Summary, error)
+  func Reindex(ctx context.Context, st *store.Store, repoRoot string, opts IndexOptions) (Summary, error)
   ```
 - **Transaction boundary.** A single transaction per "set of changed files":
   `DELETE FROM symbols/edges/tokens WHERE file IN (...)` → INSERT new data →
@@ -518,13 +522,31 @@ wrapping.
 
 ### 3.11 `visualize`
 
-- **Responsibility.** Render `graph.html`. Single static file output. Loads
-  `vis-network` / `cytoscape.js` from a CDN at view time. Header shows
-  `lastIndexed`, repo path, node/edge counts (design §9.7).
+- **Responsibility.** Render `graph.html`. Single static file output.
+  Loads `vis-network` from a CDN at view time. The header shows
+  `lastIndexed`, repo path, and node/edge counts (design §9.7); the
+  body adds a floating search box, focus-mode edges (only the
+  selected node's edges are drawn), an aside detail panel with
+  grouped outgoing references, dark mode, and selection-history nav
+  with camera follow.
 - **Public surface.**
   ```go
-  type Options struct { OutPath string; Open bool }
-  func Render(ctx, store, opts Options) (path string, err error)
+  type Options struct {
+      OutPath  string                // defaults to <repo>/.codemap/graph.html
+      Open     bool                  // open in OS default browser when set
+      FileGlob string                // forward-slash doublestar glob
+      Kinds    []core.SymbolKind     // limit symbols by kind
+  }
+
+  // DataSource is the read-only contract visualize needs from the
+  // index. store.Tx implements it; the call site provides the adapter.
+  type DataSource interface {
+      AllSymbols(ctx context.Context, fileGlob string, kinds []core.SymbolKind) ([]core.Symbol, error)
+      AllEdges(ctx context.Context) ([]core.Edge, error)
+      ReadMeta() (core.Meta, error)
+  }
+
+  func Render(ctx context.Context, ds DataSource, repoRoot string, opts Options) (path string, err error)
   ```
 
 ### 3.12 `skill`
@@ -534,10 +556,16 @@ wrapping.
 - **Public surface.**
   ```go
   type Target struct {
-      Agent string  // "claude-code" | "codex"
-      Scope string  // "user" | "project"
-      Repo  string  // used when scope == "project"
+      Agent      string  // "claude-code" | "codex"
+      Scope      string  // "user" | "project"
+      Repo       string  // used when scope == "project"
+      BinaryName string  // substituted into SKILL body; defaults to "codemap"
+      Version    string  // substituted into SKILL body
   }
+  // ErrCodexPending is returned when Agent == "codex"; the cli layer
+  // detects it via errors.Is and prints a single user-readable line.
+  var ErrCodexPending = errors.New("codex skill spec pending; verify at release time")
+
   func Install(t Target, print bool) (path string, err error)
   func Uninstall(t Target) error
   ```
@@ -546,8 +574,38 @@ wrapping.
 
 - **Responsibility.** Register cobra commands, parse flags, call into the
   domain, format output. **No logic of its own.**
+- **Subcommand surface (v0.1.x).** init, index, reindex, list, status,
+  forget, search, show, refs, calls, visualize, install-skill,
+  uninstall-skill, install-self, uninstall-self, version. The
+  install-self / uninstall-self pair lives in `install_self.go` and
+  is the only cli handler that calls into the `internal/install`
+  package.
 - **Output formatting.** `output.go` exposes `WriteHuman` and `WriteJSON`.
   All result types are either `core.*` directly or thin CLI view-models.
+
+### 3.13a `install`
+
+- **Responsibility.** Implement `codemap install-self` / `uninstall-self`.
+  Copy the running binary to `~/.codemap/bin/codemap{,.exe}` and
+  register that directory on the user's persistent PATH. Mirror image
+  on uninstall. No admin rights anywhere.
+- **Public surface.**
+  ```go
+  type Result struct {
+      BinaryPath           string
+      BinaryCopied         bool   // a fresh copy happened this run
+      PathAdded            bool   // PATH entry created (or removed)
+      ShellRCPath          string // Unix only; rc file we touched
+      PathAlreadyEffective bool   // bin dir is on the running shell's PATH
+  }
+  func InstallSelf(selfPath string) (Result, error)
+  func UninstallSelf() (Result, error)
+  ```
+- **Platform split.** Windows writes `HKCU\Environment\Path` and
+  broadcasts `WM_SETTINGCHANGE` (`path_windows.go`). Unix appends a
+  marker block to the shell rc detected from `$SHELL`
+  (`path_unix.go`); the marker lets uninstall remove exactly the
+  inserted block.
 
 ### 3.14 `platform`
 
@@ -614,9 +672,16 @@ registry.Upsert(mirror)
 output.WriteHuman/JSON(Summary)   # files indexed/skipped, lastIndexed
 ```
 
-- **Edge resolution (`Edge.Resolved`).** First pass resolves only same-file
-  call sites. Cross-file resolution runs once after all files are parsed,
-  inside the same transaction (qualname → symbol_id lookup).
+- **Edge resolution (`Edge.Resolved`).** Runs once at the end of the
+  indexing transaction in `store.Tx.ResolveEdges()`:
+  1. Exact-match pass — `to_qualname` that equals an existing
+     `symbols.qualname` is marked `resolved=1`.
+  2. Short-range rewrite — for each still-unresolved edge whose
+     `to_qualname` has no dot, prepend the module prefix of
+     `from_qualname`; if that produces a known qualname, rewrite
+     `to_qualname` and mark `resolved=1`. Catches the common
+     same-module bare-name call (PR #11). Type-aware analysis stays
+     out of scope.
 - **Failure handling.** A parse error on one file does **not** fail the run.
   The file is isolated, logged, and *its* SHA-1 is not updated, so it gets
   retried next time. A transaction-level error rolls back the whole run.
@@ -657,21 +722,50 @@ Unresolved edges (`Resolved=false`) appear in the result set, marked.
 
 ```
 visualize.Render
-   ├─ store: fetch all symbols / edges (with optional --file or --kind filters)
+   ├─ ds.AllSymbols(fileGlob, kinds) / ds.AllEdges() / ds.ReadMeta()
+   ├─ build graphNodes (dedupe by qualname, attach locations + snippet
+   │   + outgoing edges per node)
+   ├─ for any edge whose to-endpoint is not in the node set, synthesize
+   │   an "external" placeholder node so unresolved/stdlib calls are
+   │   still visible on the canvas
    ├─ inject pre-marshaled JSON into graph.html.tmpl via embed.FS
    └─ atomic-write <repo>/.codemap/graph.html → open in browser if --open
 ```
 
-Large graphs (10k+ nodes) are deferred to design Open Question 4 — v1 just
-renders, with filters as the escape hatch.
+Large graphs (10k+ nodes) are deferred to design Open Question 4 —
+v0.1.x relies on focus-mode edges (drawn only for the selected node)
+plus the `--file` / `--kind` escape hatches.
 
-### 4.6 `codemap install-skill`
+### 4.6 `codemap install-skill` and `codemap install-self`
+
+`install-skill` writes the SKILL.md template:
 
 ```
 skill.Install({Agent, Scope, Repo}, print):
    path := skill.paths.Resolve(target)   // e.g. ~/.claude/skills/codemap/SKILL.md
    body := template.Execute(SKILL.md.tmpl, {Version, BinaryName, …})
    if print: stdout
+   else:     platform.AtomicWrite(path, body)
+
+# Codex target → ErrCodexPending → cli prints a single-line help.
+```
+
+`install-self` is the post-download PATH bootstrapper:
+
+```
+install.InstallSelf(selfPath):
+   platform.EnsureDir(~/.codemap/bin)
+   if !sameFile(selfPath, dest) && !destMatchesSrc(selfPath, dest):
+       atomic copy selfPath → ~/.codemap/bin/codemap{,.exe}
+       preserve src mtime so subsequent runs are no-ops
+   addToPath(~/.codemap/bin):
+       Windows: HKCU\Environment\Path += dir; SendMessageTimeout WM_SETTINGCHANGE
+       Unix:    append marker block to ~/.bashrc / ~/.zshrc / config.fish / ~/.profile
+   return Result{BinaryCopied, PathAdded, ShellRCPath, PathAlreadyEffective}
+```
+
+Idempotent in both directions; `uninstall-self` strips exactly the
+binary and the PATH entry the install pass created.
    else: platform.AtomicWrite(path, body)
 ```
 
@@ -866,11 +960,11 @@ This is a stable contract so an agent can branch on the exit code of
 
 | Area | Policy |
 |---|---|
-| Parser workers | Default `runtime.NumCPU()`, override with `--concurrency N` |
+| Parser workers | Default `runtime.NumCPU()`, capped at 16. Set programmatically through `pipeline.IndexOptions.Concurrency`; not exposed as a CLI flag in v0.1.x. |
 | DB writer | Single goroutine (SQLite single writer); fed via channel |
 | File I/O | Walker streams; no full tree held in memory |
 | Memory ceiling | Per-file parse output is held in memory only until the transaction commits, then released |
-| Large files | Files > 1 MiB are skipped by default (configurable) — protects token spend |
+| Large files | Files > 1 MiB are skipped by default. Configurable internally via `walker.Options.MaxFileBytes`; not yet a CLI flag. |
 | Goroutine leaks | Context cancellation propagates to walker, parser, and writer |
 | WAL mode | `journal_mode=WAL` allows reader/writer concurrency (e.g. `status` reads while `index` writes) |
 

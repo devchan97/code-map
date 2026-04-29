@@ -97,7 +97,8 @@ Python + 6 개 언어 파서 (Java, JavaScript, TypeScript, TSX, C#, C++),
 go build ./cmd/codemap
 ```
 
-선택적 encoder rerank (v1 은 placeholder, M5 에서 ONNX 통합):
+선택적 encoder rerank (v0.1.x 은 placeholder; ONNX 결선은
+`internal/encoder/onnx_enabled.go` 한 파일 교체로 가능):
 
 ```sh
 go build -tags encoder ./cmd/codemap
@@ -208,7 +209,7 @@ codemap install-skill --agent claude-code --scope user
    │
    ▼
 walker → parser (tree-sitter) → lexical (BM25) → store (SQLite)
-                                 └─ encoder rerank (옵션, M5)
+                                 └─ encoder rerank (옵션, build-tag)
 ```
 
 - CLI 프로세스는 단발성입니다. 매 호출마다 SQLite 파일을 새로 엽니다.
@@ -260,6 +261,7 @@ internal/
   graph/                     # refs + calls
   visualize/                 # graph.html 렌더
   skill/                     # SKILL.md 설치기
+  install/                   # codemap install-self / uninstall-self
   platform/                  # OS 추상화 (path, atomic write, browser)
 skill/SKILL.md.tmpl          # SKILL.md 템플릿 원본
 scripts/                     # zig-cc wrapper (릴리스 타깃별)

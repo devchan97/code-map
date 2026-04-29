@@ -121,7 +121,8 @@ Implications that shape every decision below:
 - **Not a generative LLM.** Specialized encoder; query-time inference is
   <100 ms on CPU, batchable.
 - Used only as a **re-ranker** over L0's top-50, narrowing to top-10.
-- Activation: `--rerank` flag or `.codemap/config.toml` setting.
+- Activation: `--rerank` flag on `codemap search`. There is no
+  per-repo config file in v0.1.x; CLI flags are the only knob.
 
 ### 4.3 What is explicitly excluded
 
@@ -253,7 +254,7 @@ enables:
 
 - `codemap list` from anywhere.
 - `codemap search foo --repo myproject` from anywhere.
-- Cross-repo search later (M5+, optional): `codemap search foo --repo a,b,c`.
+- Cross-repo search later (post-v1; tracked in §15 Q8): `codemap search foo --repo a,b,c`.
 - Visibility into stale indexes (`last_indexed` older than N days).
 
 ---
@@ -375,9 +376,13 @@ Symbol        id
               vec?        # only if encoder enabled
 
 Edge          from_qualname
-              to_qualname        # may be unresolved name
+              to_qualname        # may be an unresolved bare name; the
+                                 # short-range resolver in store rewrites
+                                 # bare same-module callees in place
               kind               # call | reference | inherit | import
               resolved : bool
+              file               # source file the edge was discovered in;
+                                 # used by per-file cascading delete
 ```
 
 **Variable mapping (R4) rules.**
@@ -422,11 +427,21 @@ transaction. Bumps `Meta.indexed_at`.
 Single-file SQLite per repo (§7.1). One global registry TOML.
 
 ### 9.5 Search
-1. Detect query shape (identifier-like vs. natural language).
-2. BM25 over `tokens` → top-50 with structural filters.
-3. If `--rerank` and encoder available: dense re-rank → top-10.
+1. Tokenize the query the same way the index was built (CamelCase /
+   snake_case split, lowercased). Short query terms (≥ 3 chars) are
+   prefix-expanded against stored tokens so e.g. `parse` matches
+   stored `parser`/`parsed` (PR #5; `tokens.token LIKE 'parse%'`).
+2. BM25 over `tokens` → top-50 with structural filters
+   (`--kind`, `--scope`, `--file`).
+3. If `--rerank` and an encoder is available: dense re-rank against
+   `symbols.vec` → top-10.
 4. Emit JSON:
    `[{file, line_start, line_end, qualname, kind, scope, snippet, score, indexed_at}]`.
+
+There is no separate "natural language vs identifier" path inside
+codemap — every query goes through the same lexical pipeline.
+Translating prose into identifier-shaped queries is the agent's job
+(see §4.4 / SKILL.md).
 
 ### 9.6 Graph queries — `refs` (incoming) and `calls` (outgoing)
 Symmetric pair, both backed by the `edges` table.
@@ -437,9 +452,12 @@ This pair is what makes the example query "what functions does
 `main.init` call?" answerable in one round trip.
 
 ### 9.7 Visualizer
-Single static `graph.html`. One CDN dep at view time (vis-network or
-cytoscape.js). Header shows `lastIndexed`, repo path, node/edge counts.
-Filters: kind, scope, file glob.
+Single static `graph.html`. One CDN dep at view time (vis-network).
+Header shows `lastIndexed`, repo path, and node/edge counts; v0.1.x
+also adds a floating search box, focus-mode edges (drawn only for
+the selected node), an aside detail panel with grouped outgoing
+references, dark mode, and selection-history nav with camera
+follow. Render-time filters: `--file` glob, `--kind` set.
 
 ---
 
