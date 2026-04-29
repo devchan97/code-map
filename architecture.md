@@ -676,8 +676,15 @@ CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
--- known keys: schema_ver, repo_root, indexed_at, embedder,
---             symbol_count, file_count
+-- known keys: schema_ver, indexer_ver, repo_root, indexed_at,
+--             embedder, symbol_count, file_count
+--
+-- schema_ver  : on-disk SQLite layout version. Mismatch is a hard
+--               error at Open(); the user must `codemap reindex`.
+-- indexer_ver : parser/tokenizer/edge-resolver semantics version.
+--               Mismatch is surfaced through `codemap status`
+--               (Stale=true) — DB is still readable, search just
+--               returns data shaped by an older indexer.
 
 CREATE TABLE files (
     path        TEXT PRIMARY KEY,
@@ -802,9 +809,19 @@ PRAGMA foreign_keys = ON;
   "symbol_count": 4823,
   "embedder": "lexical",
   "schema_ver": 1,
-  "stale": false
+  "indexer_ver": 2,
+  "stale": false,
+  "stale_reason": ""
 }
 ```
+
+`indexer_ver` is bumped when the parser/tokenizer/edge-resolver
+semantics change without altering the SQLite layout. `stale` becomes
+true (and `stale_reason` is populated with a one-line user-facing
+message) whenever the on-disk indexer_ver differs from the running
+binary's value, including the legacy case of a pre-tracking index
+(`indexer_ver = 0`). The DB is always readable; the field is a hint
+to run `codemap reindex`.
 
 #### `codemap refs --json` / `codemap calls --json`
 ```json
@@ -921,8 +938,10 @@ expected hit.
 | New language | `internal/parser/<lang>/` + `parser.Register` |
 | New embedder | Implement `encoder.Encoder` behind a build tag |
 | Alternative retrieval backend (FTS5 etc.) | Second implementation of `lexical.Index` |
-| Cross-repo search (M5+) | Extend `search.Run` to take `[]repoRoot` |
+| Cross-repo search (post-v1) | Extend `search.Run` to take `[]repoRoot` |
 | New agent SKILL | New case in `skill/paths.go` |
+| Bump indexer semantics (parser / tokenizer / resolver change) | Bump `store.IndexerVer`; users see `stale=true` on next `codemap status` |
+| Self-install destination / PATH wiring | `internal/install/path_<os>.go`; one file per platform |
 
 Anything not on this list is intentionally out of scope for v1 — no
 monitoring, metrics, or plugin loader.
@@ -934,11 +953,12 @@ monitoring, metrics, or plugin loader.
 | Milestone | Status | Modules in scope | Acceptance |
 |---|---|---|---|
 | M1 | ✅ Done | cli/{init,index,reindex,list,status,forget,search,show,refs,calls}, core, walker, parser/python, lexical, store, registry, pipeline, platform | Useful results on a real Python repo; multi-repo registry works |
-| M2 | ✅ Done | visualize, cli/visualize, lastIndexed surfaced | Static HTML; header populated with lastIndexed, repo path, node/edge counts |
+| M2 | ✅ Done | visualize, cli/visualize, lastIndexed surfaced | Static HTML; header populated with lastIndexed, repo path, node/edge counts. Subsequent v0.1.x added search box, focus-mode edges, dark mode, aside detail panel, and selection-history nav. |
 | M3 | ✅ Done | parser/java, parser/ts (JS+TS+TSX), parser/csharp, parser/cpp | Each language yields correct symbol/edge output on a fixture file; polyglot repo indexes cleanly |
-| M4 | ✅ Done | skill, cli/install-skill, SKILL.md template + golden test, drift guard | Template renders byte-exact; install/uninstall round-trip verified |
+| M4 | ✅ Done | skill, cli/install-skill, SKILL.md template + golden test, drift guard | Template renders byte-exact; install/uninstall round-trip verified. Codex agent target is rejected with a single user-readable message until upstream spec stabilises. |
 | M5 | ✅ Done (placeholder) | encoder (build tag), search rerank path | Both build modes compile; nil-encoder fallback returns BM25 cleanly. Real ONNX session is a one-file swap in `onnx_enabled.go`. |
-| M6 | ✅ Done (release pipeline) | release.yml, GoReleaser config, scripts/zigcc-* wrappers, Homebrew tap stanza | Single-runner zig-cc cross-compile; v* tag triggers GoReleaser. Homebrew tap publishing requires `devchan97/homebrew-tap` and `HOMEBREW_TAP_TOKEN`. |
+| M6 | ✅ Done (release pipeline) | release.yml, GoReleaser config, scripts/zigcc-* wrappers, install/uninstall-self | Single-runner zig-cc cross-compile; `v*` tag triggers GoReleaser. Linux amd64/arm64 + Windows amd64 ship every release; darwin and Windows arm64 are deferred (.goreleaser.yml). End users get on PATH via `codemap install-self` (no admin) or `go install`. |
+| post-M6 | ongoing | indexer_ver, short-range edge resolver, status count consistency, BM25 prefix expansion, install-self, UX polish | v0.1.x patch releases (#5–#12). Issues #1/#2/#3 closed; design.md §15 Q1/Q2/Q6/Q7 resolved, Q3 short-range fix landed. |
 
 ---
 
@@ -955,18 +975,33 @@ monitoring, metrics, or plugin loader.
 
 ---
 
-## 14. Open Decisions
+## 14. Resolved Decisions
 
-A. **SQLite driver.** `modernc` (pure Go) vs `mattn` (CGO). Tree-sitter is
-   already CGO, so `mattn` is the simplest choice. Decided early in M1.
-B. **BM25 backend.** Custom `tokens` table vs SQLite FTS5 virtual table. The
-   custom path gives more weight-tuning freedom. Start custom in M1; fall
-   back to FTS5 only on perf failure.
-C. **Edge resolution depth.** Cross-file resolution in dynamic languages
-   stays best-effort. v1 marks an edge `resolved=true` only on exact qualname
-   match; everything else stays `resolved=false`.
-D. **Windows path normalisation.** Every stored path is forward-slash; OS
-   conversion happens only in `platform.PathFromRel`. (The dev environment
-   here is Windows, so this is enforced from day one.)
-E. **Tree-sitter grammar pinning.** `go.mod` pins explicit SHAs. The first
-   M1 PR locks them in.
+A. **SQLite driver — `modernc.org/sqlite` (pure Go).** The original
+   note here said `mattn` because tree-sitter is already CGO; the
+   actual M1 implementation chose `modernc.org/sqlite` so that any
+   piece of the codebase that does *not* import a tree-sitter parser
+   (e.g. `internal/store`, `internal/cli`, the entire test suite) can
+   build and run without a C toolchain. tree-sitter's CGO requirement
+   is local to `internal/parser/<lang>/`. Decision: keep modernc.
+B. **BM25 backend — custom `tokens` table.** Started custom in M1 and
+   stayed there: hand-rolled BM25 in `internal/lexical` plus the
+   inverted index in SQLite. PR #5's query-time prefix expansion was
+   a single-file change because of this; FTS5 would have made the
+   same change considerably harder. No fallback needed.
+C. **Edge resolution depth — exact match plus a narrow same-module
+   prefix rewrite.** v1 marked an edge `resolved=true` only on exact
+   qualname match (everything else, including same-module bare-name
+   calls in dynamic languages, stayed unresolved). PR #11 added a
+   second pass: for an unresolved edge whose `to_qualname` has no
+   dot, prepend the `from_qualname`'s module prefix and check
+   whether that produces a known qualname. Type inference,
+   transitive imports, aliasing remain explicit non-goals — design
+   philosophy keeps codemap shallow but cheap rather than reaching
+   for IDE-level accuracy. The bump landed under `IndexerVer = 2`.
+D. **Windows path normalisation.** Every stored path is forward-slash;
+   OS conversion happens only in `platform.PathFromRel`. The dev
+   environment here is Windows, so this is enforced from day one.
+E. **Tree-sitter grammar pinning.** `go.mod` pins explicit SHAs. The
+   first M1 PR locked them in; subsequent bumps go through `go get`
+   like any other dependency.
