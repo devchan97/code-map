@@ -27,12 +27,13 @@ agent can partial-read instead of loading entire files.
 ## Highlights
 
 - **Embedded per-repo SQLite store** at `<repo>/.codemap/index.db` plus a
-  global registry at `~/.codemap/registry.toml`. No server, no daemon.
-- **Lexical retrieval (BM25)** by default — zero ML dependency, fast on
-  identifier-shaped queries (the dominant workload).
-- **Optional encoder rerank** behind a build tag (`-tags encoder`) for
-  prose-heavy queries. Off by default to keep the binary small and cold-start
-  fast.
+  global registry at `~/.codemap/registry.toml`. No server, no daemon, no
+  background process — every invocation is a fresh process with a cold-start
+  budget under 50 ms.
+- **Lexical retrieval (BM25)**, hand-rolled, by default. Zero ML
+  dependency, fast on identifier-shaped queries (the dominant workload).
+  Optional encoder rerank lives behind `-tags encoder` so the default
+  binary stays small.
 - **Tree-sitter parsers** for Python, Java, JavaScript, TypeScript, TSX,
   C#, and C++. Extract symbols (functions, methods, classes, variables,
   imports, constants) plus call / reference / inherit / import edges. Go and
@@ -40,19 +41,55 @@ agent can partial-read instead of loading entire files.
 - **SKILL.md auto-install** via `codemap install-skill` so coding agents
   (Claude Code; Codex when its skill spec is final) call codemap before
   reading whole files.
-- **Single static binary**, cross-compiled with zig-cc and distributed via
-  Homebrew, GitHub Releases, and `go install`.
-- **Local only.** Default builds make zero outbound network calls; the index
-  never leaves your machine.
+- **One-shot install** via `codemap install-self` — copies the binary to
+  `~/.codemap/bin` and persists it on `PATH` (HKCU on Windows, shell rc on
+  Unix). No admin rights required.
+- **Single static binary** for end users — release artifacts are
+  cross-compiled with zig-cc, so installing codemap does not require a
+  local C toolchain even though tree-sitter is CGO under the hood.
+- **Local only.** Default builds make zero outbound network calls; the
+  index never leaves your machine.
+
+## Design philosophy
+
+codemap is opinionated about what it is and what it is not. The same
+trade-offs that make it a good fit for one workflow make it a poor fit
+for another, so the boundaries are stated up front.
+
+- **Agent-first, not human-first.** The primary user is a coding agent
+  calling codemap as a subprocess on every relevant turn, not a human
+  navigating a graph in an IDE. CLI + stable JSON contracts come first;
+  GUIs come last. The interactive `graph.html` is a useful side effect of
+  having the data, not the product.
+- **Pure retrieval, no LLM.** codemap returns identifiers and `file:line`
+  ranges. It does not embed an LLM, call an external embedding API, do
+  RAG-style chunking, or interpret natural language. All reasoning is the
+  caller's responsibility. This keeps cost predictable, output auditable,
+  and the binary trivial to ship.
+- **Cheap reuse over deep accuracy.** Indexing is incremental
+  (per-file SHA-1), no-op runs finish in around 10 ms, and `status` reads
+  only the SQLite meta header. An agent can call codemap on every turn
+  without thinking about cost. The trade-off is that codemap deliberately
+  stops at tree-sitter — it does not run a type-aware resolver, build a
+  full call graph, or guarantee every edge resolves to a known symbol.
+  When you need that, reach for an IDE or a language server; codemap is
+  not trying to replace them.
+- **Boring, dependency-light tech.** SQLite (`modernc.org/sqlite`, pure
+  Go), BM25 hand-rolled instead of pulling in a search engine, ML
+  dependencies gated behind a build tag, no plugin loader. Adding a
+  language is a code change and a rebuild.
+- **Local, single-user, no telemetry.** No server, no shared cache, no
+  data leaving the machine in any default code path.
 
 ## Status
 
-M1 – M6 complete. Python + 6 additional language parsers (Java, JavaScript,
-TypeScript, TSX, C#, C++), `visualize` with `lastIndexed` surfaced
-everywhere, SKILL.md installer, encoder rerank gated behind the `encoder`
-build tag (ONNX wiring is a one-file swap), and a zig-cc + GoReleaser
-release pipeline targeting darwin amd64 / arm64, linux amd64 / arm64, and
-windows amd64.
+Python + six additional language parsers (Java, JavaScript, TypeScript,
+TSX, C#, C++), `visualize` with `lastIndexed` surfaced everywhere,
+SKILL.md installer, `install-self` for one-shot PATH setup, encoder
+rerank gated behind the `encoder` build tag (ONNX wiring is a one-file
+swap), and a zig-cc + GoReleaser release pipeline. Linux amd64 / arm64
+and Windows amd64 binaries are published on every `v*` tag; macOS
+builds are temporarily disabled (see `.goreleaser.yml`).
 
 ## Build
 
@@ -75,6 +112,31 @@ make build   # builds ./bin/codemap
 make vet     # go vet ./...
 make ci      # vet + build + encoder-tag build
 ```
+
+## Install
+
+Download the appropriate archive from the
+[Releases page](https://github.com/devchan97/code-map/releases),
+extract it, and run the binary once with `install-self`:
+
+```sh
+# Linux / macOS
+./codemap install-self
+
+# Windows (PowerShell, from the extracted folder)
+.\codemap.exe install-self
+```
+
+This copies the binary to `~/.codemap/bin` and registers that path on
+your user `PATH` (HKCU\Environment on Windows, a marker block in
+`~/.bashrc` / `~/.zshrc` / `~/.config/fish/config.fish` / `~/.profile`
+on Unix). Open a new shell afterwards and `codemap` works as a bare
+command. `codemap uninstall-self` reverses both side effects.
+
+If you already have a Go toolchain and the relevant C compiler,
+`go install github.com/devchan97/code-map/cmd/codemap@latest` is also
+an option — it lands the binary in `$GOPATH/bin`, which most people
+already have on `PATH`.
 
 ## Quick start
 
@@ -126,6 +188,8 @@ the public contract — see `architecture.md` §6.2.
 | `codemap visualize [PATH\|NAME] [flags]` | Render `graph.html`. Flags: `--out`, `--open`. |
 | `codemap install-skill` | Install SKILL.md. Flags: `--agent`, `--scope`, `--print`. |
 | `codemap uninstall-skill` | Remove the installed SKILL.md. |
+| `codemap install-self` | Copy the running binary to `~/.codemap/bin` and add it to user PATH. |
+| `codemap uninstall-self` | Remove the installed binary and undo the PATH change. |
 | `codemap version` | Print version, schema version, and active embedder. |
 
 ## Architecture
@@ -233,12 +297,12 @@ the rest of the codebase still builds and tests cleanly.
 
 Releases are produced by `.github/workflows/release.yml`, which runs
 GoReleaser on a single `ubuntu-latest` runner and uses zig-cc as a universal
-cross-compiler for every CGO target (darwin amd64 / arm64, linux amd64 /
-arm64, windows amd64). One-line wrapper scripts in `scripts/` bake each
-target's `-target <triple>` flag into `$CC` / `$CXX` so CGO sees a single
-executable path — without that wrapper indirection, spaces in `CC=zig cc
--target …` break Go's link step. Triggered by every `v*` tag push. Windows
-arm64 is deferred.
+cross-compiler for every CGO target. One-line wrapper scripts in `scripts/`
+bake each target's `-target <triple>` flag into `$CC` / `$CXX` so CGO sees
+a single executable path — without that wrapper indirection, spaces in
+`CC=zig cc -target …` break Go's link step. Triggered by every `v*` tag
+push. Linux amd64 / arm64 and Windows amd64 are currently shipped; darwin
+and Windows arm64 are deferred.
 
 ## License
 
