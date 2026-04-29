@@ -221,7 +221,7 @@ cli ──► search / pipeline / graph / visualize / skill / registry
 |---|---|---|
 | CLI | `spf13/cobra` + `spf13/pflag` | Standard. |
 | TOML | `BurntSushi/toml` | Stable. |
-| SQLite | `modernc.org/sqlite` (pure Go) **or** `mattn/go-sqlite3` (CGO) | Tree-sitter is already CGO, so `mattn` is fine; we still prefer `modernc` to keep cross-builds simple. Locked in M1. |
+| SQLite | `modernc.org/sqlite` (pure Go) | Locked in M1. tree-sitter's CGO requirement is local to `internal/parser/<lang>/`; everything else (store, cli, tests) builds CGO-free with this driver. See §14.A for the trade-off. |
 | Tree-sitter | `smacker/go-tree-sitter` (CGO) | One submodule per grammar. |
 | Gitignore | `sabhiram/go-gitignore` | Same engine handles `.codemapignore`. |
 | BM25 | hand-rolled in `lexical` | A full-stack Bleve is overkill (design §15.2). |
