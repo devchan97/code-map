@@ -59,7 +59,16 @@ type Edge struct {
 // Meta holds the top-level metadata for a repo index.
 type Meta struct {
 	// SchemaVer is the integer schema version stored in the index.
+	// Bumped when the on-disk SQLite layout changes; mismatch is a hard
+	// error (the DB literally can't be read by a newer/older binary).
 	SchemaVer int `json:"schema_ver"`
+	// IndexerVer is bumped when the meaning of the data changes — a
+	// new tokenizer rule, a parser that emits qualnames differently,
+	// etc. The DB is still readable across an indexer_ver skew, but
+	// search results will be wrong until the user runs `codemap
+	// reindex`. Surfaced via `codemap status` rather than failing
+	// open(); see internal/store/schema.go for the current value.
+	IndexerVer int `json:"indexer_ver"`
 	// RepoRoot is the absolute path to the indexed repository root.
 	RepoRoot string `json:"repo_root"`
 	// IndexedAt is the UTC timestamp of the most recent successful index run.
