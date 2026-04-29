@@ -300,6 +300,60 @@ func TestStore_SearchBM25_Basic(t *testing.T) {
 	}
 }
 
+// TestStore_SearchBM25_PrefixExpansion guards Issue #2: a query like "parse"
+// must match symbols whose tokens begin with "parse" (e.g. "parser",
+// "parsing"), since BM25 over IN(...) is exact-match and tokens aren't
+// stemmed at index time.
+func TestStore_SearchBM25_PrefixExpansion(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	err := st.WithTx(ctx, func(tx Tx) error {
+		if err := tx.UpsertFile(core.File{Path: "a.py", SHA1: "h", IndexedAt: now, Language: "python", SizeBytes: 1}); err != nil {
+			return err
+		}
+		ids, err := tx.InsertSymbols([]core.Symbol{
+			{Name: "parser", Qualname: "a.parser", Kind: core.SymbolFunction, Scope: core.ScopeGlobal, File: "a.py", LineStart: 1, LineEnd: 2, Snippet: "def parser"},
+			{Name: "unrelated", Qualname: "a.unrelated", Kind: core.SymbolFunction, Scope: core.ScopeGlobal, File: "a.py", LineStart: 3, LineEnd: 4, Snippet: "def unrelated"},
+		})
+		if err != nil {
+			return err
+		}
+		for i, s := range []core.Symbol{
+			{Name: "parser", Qualname: "a.parser"},
+			{Name: "unrelated", Qualname: "a.unrelated"},
+		} {
+			if err := tx.InsertTokens(ids[i], lexical.Tokenize(s)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Query "parse" must hit "parser" via prefix expansion.
+	err = st.WithTx(ctx, func(tx Tx) error {
+		results, err := tx.SearchBM25(ctx, "parse", 10, lexical.Filters{})
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			t.Fatalf("query \"parse\" returned no results; expected to hit \"parser\" via prefix expansion")
+		}
+		hyd, _ := tx.HydrateSymbols([]int64{results[0].SymbolID})
+		if hyd[0].Name != "parser" {
+			t.Errorf("top hit = %q; want parser", hyd[0].Name)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStore_SchemaMismatch(t *testing.T) {
 	root := t.TempDir()
 	st, err := Open(root)
